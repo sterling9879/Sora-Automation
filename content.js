@@ -206,8 +206,7 @@ class SoraAutomation {
     console.log('[Sora Automation] ===== GENERATING VIDEO =====');
     console.log('[Sora Automation] Scene:', video.scene);
     console.log('[Sora Automation] Full prompt:', video.fullPrompt);
-    console.log('[Sora Automation] Has image:', !!video.imageData);
-
+    
     video.status = 'processing';
     this.currentlyProcessing.push(video.id);
     this.sendStatusUpdate();
@@ -219,14 +218,6 @@ class SoraAutomation {
       await this.waitForPageLoad();
       console.log('[Sora Automation] Page loaded, waiting 3s for React...');
       await this.sleep(3000);
-
-      // Upload image if present
-      if (video.imageData) {
-        console.log('[Sora Automation] Uploading image...');
-        await this.uploadImage(video.imageData);
-        console.log('[Sora Automation] Image uploaded successfully');
-        await this.sleep(2000); // Wait for image to process
-      }
 
       // Find textarea - usando o placeholder exato do HTML
       console.log('[Sora Automation] Looking for textarea...');
@@ -510,106 +501,15 @@ class SoraAutomation {
   // DOM Helpers
   // ========================================
 
-  async uploadImage(base64Data) {
-    console.log('[Sora Automation] uploadImage called');
-
-    try {
-      // Convert base64 to blob
-      const blob = await this.base64ToBlob(base64Data);
-      console.log('[Sora Automation] Blob created:', blob.type, blob.size);
-
-      // Look for file input or upload button
-      // Try multiple selectors
-      const selectors = [
-        'input[type="file"]',
-        'input[accept*="image"]',
-        '[data-testid*="upload"]',
-        'button[aria-label*="upload"]',
-        'button[aria-label*="image"]'
-      ];
-
-      let fileInput = null;
-      for (const selector of selectors) {
-        console.log('[Sora Automation] Trying selector:', selector);
-        fileInput = document.querySelector(selector);
-        if (fileInput) {
-          console.log('[Sora Automation] Found file input with:', selector);
-          break;
-        }
-      }
-
-      if (!fileInput) {
-        // Look for buttons that might trigger file input
-        const buttons = document.querySelectorAll('button');
-        for (const btn of buttons) {
-          const ariaLabel = btn.getAttribute('aria-label') || '';
-          const title = btn.getAttribute('title') || '';
-          if (ariaLabel.toLowerCase().includes('image') ||
-              ariaLabel.toLowerCase().includes('upload') ||
-              title.toLowerCase().includes('image') ||
-              title.toLowerCase().includes('upload')) {
-            console.log('[Sora Automation] Found potential upload button');
-            btn.click();
-            await this.sleep(1000);
-
-            // Try to find file input again
-            fileInput = document.querySelector('input[type="file"]');
-            if (fileInput) break;
-          }
-        }
-      }
-
-      if (!fileInput) {
-        throw new Error('File input not found');
-      }
-
-      // Create a File from the blob
-      const file = new File([blob], 'image.png', { type: blob.type });
-      console.log('[Sora Automation] File created:', file.name, file.type);
-
-      // Create a DataTransfer to simulate file selection
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(file);
-      fileInput.files = dataTransfer.files;
-
-      // Trigger change event
-      const changeEvent = new Event('change', { bubbles: true });
-      fileInput.dispatchEvent(changeEvent);
-
-      console.log('[Sora Automation] File input updated and change event dispatched');
-
-    } catch (error) {
-      console.error('[Sora Automation] Error uploading image:', error);
-      throw error;
-    }
-  }
-
-  async base64ToBlob(base64Data) {
-    // Remove data:image/xxx;base64, prefix if present
-    const base64String = base64Data.split(',')[1] || base64Data;
-    const mimeMatch = base64Data.match(/data:([^;]+);/);
-    const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
-
-    // Decode base64
-    const byteCharacters = atob(base64String);
-    const byteNumbers = new Array(byteCharacters.length);
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-
-    return new Blob([byteArray], { type: mimeType });
-  }
-
   async waitForElement(selector, timeout = 10000) {
     const startTime = Date.now();
-
+    
     while (Date.now() - startTime < timeout) {
       const element = document.querySelector(selector);
       if (element) return element;
       await this.sleep(100);
     }
-
+    
     return null;
   }
 
