@@ -222,17 +222,11 @@ class SoraAutomation {
       console.log('[Sora Automation] Page loaded, waiting 3s for React...');
       await this.sleep(3000);
 
-      // Upload image if present
+      // Upload image if present - DISABLED FOR NOW to prevent issues
+      // TODO: Implement image upload later
       if (video.imageData && video.imageData !== null && video.imageData.length > 0) {
-        console.log('[Sora Automation] Uploading image...');
-        try {
-          await this.uploadImage(video.imageData);
-          console.log('[Sora Automation] ✅ Image uploaded successfully');
-          await this.sleep(2000); // Wait for image to process
-        } catch (uploadError) {
-          console.error('[Sora Automation] ⚠️ Image upload failed, continuing without image:', uploadError.message);
-          // Continue without image - don't fail the entire video generation
-        }
+        console.log('[Sora Automation] ⚠️ Image upload is currently disabled');
+        console.log('[Sora Automation] Proceeding with text-only prompt');
       } else {
         console.log('[Sora Automation] No image to upload, proceeding with text only');
       }
