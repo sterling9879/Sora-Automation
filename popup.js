@@ -32,10 +32,9 @@ class TemplateManager {
       usageCount: 0,
       favorite: templateData.favorite || false,
       exampleInput: templateData.exampleInput || '',
-      exampleOutput: this.generatePrompt(templateData.prefix, templateData.exampleInput, templateData.suffix),
-      imageData: templateData.imageData || null // Add image data
+      exampleOutput: this.generatePrompt(templateData.prefix, templateData.exampleInput, templateData.suffix)
     };
-
+    
     this.templates.push(template);
     this.saveTemplates();
     return template;
@@ -203,10 +202,6 @@ class UIManager {
     this.templateNameInput = document.getElementById('template-name-input');
     this.templateDescriptionInput = document.getElementById('template-description-input');
     this.templateCategoryInput = document.getElementById('template-category-input');
-    this.templateImageInput = document.getElementById('template-image-input');
-    this.templateImagePreview = document.getElementById('template-image-preview');
-    this.templateImagePreviewImg = document.getElementById('template-image-preview-img');
-    this.removeImageBtn = document.getElementById('remove-image-btn');
     this.templatePrefixInput = document.getElementById('template-prefix-input');
     this.templateSuffixInput = document.getElementById('template-suffix-input');
     this.templateExampleInput = document.getElementById('template-example-input');
@@ -215,9 +210,6 @@ class UIManager {
     this.templateFavoriteInput = document.getElementById('template-favorite-input');
     this.saveTemplateBtn = document.getElementById('save-template-btn');
     this.cancelTemplateBtn = document.getElementById('cancel-template-btn');
-
-    // Store current image data
-    this.currentImageData = null;
 
     // Preview modal
     this.previewModal = document.getElementById('preview-modal');
@@ -264,8 +256,6 @@ class UIManager {
     // Template modal
     this.saveTemplateBtn.addEventListener('click', () => this.saveTemplate());
     this.cancelTemplateBtn.addEventListener('click', () => this.closeTemplateModal());
-    this.templateImageInput.addEventListener('change', (e) => this.handleImageUpload(e));
-    this.removeImageBtn.addEventListener('click', () => this.removeImage());
     this.templatePrefixInput.addEventListener('input', () => this.updateTemplatePreview());
     this.templateSuffixInput.addEventListener('input', () => this.updateTemplatePreview());
     this.templateExampleInput.addEventListener('input', () => this.updateTemplatePreview());
@@ -522,10 +512,9 @@ class UIManager {
         const prompts = this.scenes.map(scene => {
           return {
             scene: scene,
-            fullPrompt: template
+            fullPrompt: template 
               ? this.templateManager.generatePrompt(template.prefix, scene, template.suffix)
-              : scene,
-            imageData: template ? template.imageData : null // Include image data
+              : scene
           };
         });
 
@@ -710,7 +699,7 @@ class UIManager {
     card.innerHTML = `
       <div class="template-card-header">
         <div class="template-card-title">
-          ${template.favorite ? '⭐ ' : ''}${this.escapeHtml(template.name)}${template.imageData ? ' 🖼️' : ''}
+          ${template.favorite ? '⭐ ' : ''}${this.escapeHtml(template.name)}
         </div>
         <div class="template-card-actions">
           <button class="btn-secondary" onclick="uiManager.editTemplate('${template.id}')">✏️</button>
@@ -718,7 +707,7 @@ class UIManager {
         </div>
       </div>
       <div class="template-card-meta">
-        ${categoryIcons[template.category]} ${categoryNames[template.category]} • Usado ${template.usageCount} vezes${template.imageData ? ' • Com imagem' : ''}
+        ${categoryIcons[template.category]} ${categoryNames[template.category]} • Usado ${template.usageCount} vezes
       </div>
       ${template.description ? `<div class="template-card-description">${this.escapeHtml(template.description)}</div>` : ''}
       <div class="template-card-preview">${this.escapeHtml(template.prefix)}{scene}${this.escapeHtml(template.suffix)}</div>
@@ -733,11 +722,11 @@ class UIManager {
 
   openTemplateModal(templateId = null) {
     this.templateManager.currentEditingId = templateId;
-
+    
     if (templateId) {
       const template = this.templateManager.get(templateId);
       if (!template) return;
-
+      
       this.modalTitle.textContent = '✏️ Editar Template';
       this.templateNameInput.value = template.name;
       this.templateDescriptionInput.value = template.description;
@@ -746,15 +735,6 @@ class UIManager {
       this.templateSuffixInput.value = template.suffix;
       this.templateExampleInput.value = template.exampleInput;
       this.templateFavoriteInput.checked = template.favorite;
-
-      // Load image if exists
-      if (template.imageData) {
-        this.currentImageData = template.imageData;
-        this.showImagePreview(template.imageData);
-      } else {
-        this.currentImageData = null;
-        this.hideImagePreview();
-      }
     } else {
       this.modalTitle.textContent = '✨ Criar Novo Template';
       this.templateNameInput.value = '';
@@ -764,64 +744,10 @@ class UIManager {
       this.templateSuffixInput.value = '';
       this.templateExampleInput.value = '';
       this.templateFavoriteInput.checked = false;
-      this.currentImageData = null;
-      this.hideImagePreview();
     }
-
+    
     this.updateTemplatePreview();
     this.templateModal.classList.add('active');
-  }
-
-  async handleImageUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      this.showNotification('Por favor, selecione um arquivo de imagem válido!', 'error');
-      return;
-    }
-
-    // Validate file size (max 5MB)
-    const maxSize = 5 * 1024 * 1024; // 5MB
-    if (file.size > maxSize) {
-      this.showNotification('A imagem é muito grande! Tamanho máximo: 5MB', 'error');
-      return;
-    }
-
-    try {
-      const base64 = await this.imageToBase64(file);
-      this.currentImageData = base64;
-      this.showImagePreview(base64);
-    } catch (error) {
-      console.error('Error processing image:', error);
-      this.showNotification('Erro ao processar a imagem!', 'error');
-    }
-  }
-
-  imageToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
-
-  showImagePreview(base64Data) {
-    this.templateImagePreviewImg.src = base64Data;
-    this.templateImagePreview.style.display = 'flex';
-  }
-
-  hideImagePreview() {
-    this.templateImagePreview.style.display = 'none';
-    this.templateImagePreviewImg.src = '';
-  }
-
-  removeImage() {
-    this.currentImageData = null;
-    this.templateImageInput.value = '';
-    this.hideImagePreview();
   }
 
   closeTemplateModal() {
@@ -852,17 +778,17 @@ class UIManager {
     const name = this.templateNameInput.value.trim();
     const prefix = this.templatePrefixInput.value;
     const suffix = this.templateSuffixInput.value;
-
+    
     if (!name) {
       this.showNotification('Nome do template é obrigatório!', 'error');
       return;
     }
-
+    
     if (!prefix && !suffix) {
       this.showNotification('Template deve ter pelo menos um prefixo ou sufixo!', 'error');
       return;
     }
-
+    
     const templateData = {
       name: name,
       description: this.templateDescriptionInput.value.trim(),
@@ -870,10 +796,9 @@ class UIManager {
       prefix: prefix,
       suffix: suffix,
       exampleInput: this.templateExampleInput.value.trim(),
-      favorite: this.templateFavoriteInput.checked,
-      imageData: this.currentImageData // Add image data
+      favorite: this.templateFavoriteInput.checked
     };
-
+    
     if (this.templateManager.currentEditingId) {
       this.templateManager.update(this.templateManager.currentEditingId, templateData);
       this.showNotification('Template atualizado!', 'success');
@@ -881,7 +806,7 @@ class UIManager {
       this.templateManager.create(templateData);
       this.showNotification('Template criado!', 'success');
     }
-
+    
     this.closeTemplateModal();
     this.renderTemplates();
     this.populateTemplateSelect();
