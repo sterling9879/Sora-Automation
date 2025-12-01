@@ -1,692 +1,562 @@
 // ========================================
-// CONTENT.JS - Interage com a página do Sora
+// SORA QUEUE MANAGER - Content Script
+// Gerenciador de fila com máximo 3 gerações simultâneas
 // ========================================
 
-class SoraAutomation {
+class SoraQueueManager {
   constructor() {
-    console.log('[Sora Automation] ===== CONSTRUCTOR CALLED =====');
-    console.log('[Sora Automation] URL:', window.location.href);
-    console.log('[Sora Automation] Initializing...');
-    
-    this.isMonitoring = false;
-    this.currentlyProcessing = [];
     this.queue = [];
-    this.completedVideos = [];
+    this.isRunning = false;
+    this.isPaused = false;
     this.maxConcurrent = 3;
-    this.checkInterval = 3000; // Check every 3 seconds
-    this.monitoringInterval = null;
-    
+    this.pollingInterval = 7000; // 7 segundos
+    this.pollingTimer = null;
+    this.tasksEndpoint = null;
+    this.activeTasks = [];
+    this.completedCount = 0;
+    this.panelVisible = false;
+
     this.init();
-    console.log('[Sora Automation] Constructor complete');
   }
 
   init() {
-    console.log('[Sora Automation] ===== INIT CALLED =====');
-    console.log('[Sora Automation] Extension loaded on:', window.location.href);
-    
-    // Listen for messages from popup/background
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      console.log('[Sora Automation] ===== MESSAGE RECEIVED =====');
-      console.log('[Sora Automation] Message type:', message.type);
-      console.log('[Sora Automation] Message data:', message.data);
-      this.handleMessage(message, sendResponse);
-      return true; // Keep channel open for async response
-    });
-
-    // Check if we're on the right page
-    this.checkPage();
-    
-    console.log('[Sora Automation] Init complete, ready to receive messages');
-  }
-
-  handleMessage(message, sendResponse) {
-    switch (message.type) {
-      case 'START_QUEUE':
-        this.startQueue(message.data);
-        sendResponse({ success: true });
-        break;
-        
-      case 'PAUSE_QUEUE':
-        this.pauseQueue();
-        sendResponse({ success: true });
-        break;
-        
-      case 'RESUME_QUEUE':
-        this.resumeQueue();
-        sendResponse({ success: true });
-        break;
-        
-      case 'STOP_QUEUE':
-        this.stopQueue();
-        sendResponse({ success: true });
-        break;
-        
-      case 'GET_STATUS':
-        sendResponse(this.getStatus());
-        break;
-        
-      case 'CHECK_PAGE':
-        sendResponse({ isValidPage: this.isValidPage() });
-        break;
-        
-      default:
-        sendResponse({ error: 'Unknown message type' });
-    }
-  }
-
-  checkPage() {
-    const url = window.location.href;
-    if (url.includes('sora.chatgpt.com')) {
-      console.log('[Sora Automation] On Sora page');
-      this.isValidPage = () => true;
-    } else {
-      this.isValidPage = () => false;
-    }
-  }
-
-  isValidPage() {
-    return window.location.href.includes('sora.chatgpt.com');
+    this.loadFromStorage();
+    this.interceptFetch();
+    this.createPanel();
+    this.log('Extensão carregada');
   }
 
   // ========================================
-  // Queue Management
+  // Interceptação de Fetch para descobrir endpoints
   // ========================================
 
-  startQueue(data) {
-    console.log('[Sora Automation] ===== START QUEUE CALLED =====');
-    console.log('[Sora Automation] Received data:', data);
-    console.log('[Sora Automation] Number of prompts:', data.prompts ? data.prompts.length : 0);
-    
-    if (!data.prompts || data.prompts.length === 0) {
-      console.error('[Sora Automation] ❌ No prompts received!');
-      return;
-    }
-    
-    console.log('[Sora Automation] First prompt:', data.prompts[0]);
-    
-    this.queue = data.prompts.map((prompt, index) => {
-      const video = {
-        id: `video_${Date.now()}_${index}`,
-        scene: prompt.scene,
-        fullPrompt: prompt.fullPrompt,
-        status: 'pending',
-        retries: 0,
-        maxRetries: data.settings.maxRetries || 3
-      };
-      console.log(`[Sora Automation] Video ${index + 1}:`, {
-        scene: video.scene,
-        fullPromptLength: video.fullPrompt ? video.fullPrompt.length : 0,
-        fullPromptPreview: video.fullPrompt ? video.fullPrompt.substring(0, 50) + '...' : 'EMPTY'
-      });
-      return video;
-    });
+  interceptFetch() {
+    const originalFetch = window.fetch;
+    const self = this;
 
-    this.settings = data.settings;
-    this.currentlyProcessing = [];
-    this.completedVideos = [];
-    
-    console.log('[Sora Automation] Queue initialized with', this.queue.length, 'videos');
-    
-    this.isMonitoring = true;
-    this.startMonitoring();
-    
-    // Process queue - this will send the first video
-    console.log('[Sora Automation] Starting to process queue...');
-    this.processQueue();
-  }
+    window.fetch = async function(...args) {
+      const response = await originalFetch.apply(this, args);
 
-  pauseQueue() {
-    console.log('[Sora Automation] Pausing queue');
-    this.isMonitoring = false;
-    if (this.monitoringInterval) {
-      clearInterval(this.monitoringInterval);
-      this.monitoringInterval = null;
-    }
-  }
-
-  resumeQueue() {
-    console.log('[Sora Automation] Resuming queue');
-    this.isMonitoring = true;
-    this.startMonitoring();
-    this.processQueue();
-  }
-
-  stopQueue() {
-    console.log('[Sora Automation] Stopping queue');
-    this.isMonitoring = false;
-    if (this.monitoringInterval) {
-      clearInterval(this.monitoringInterval);
-      this.monitoringInterval = null;
-    }
-    this.queue = [];
-    this.currentlyProcessing = [];
-    this.sendStatusUpdate();
-  }
-
-  async processQueue() {
-    if (!this.isMonitoring) return;
-
-    console.log('[Sora Automation] Processing queue...', {
-      currentProcessing: this.currentlyProcessing.length,
-      pending: this.queue.filter(v => v.status === 'pending').length,
-      completed: this.queue.filter(v => v.status === 'completed').length
-    });
-
-    // Process ONE video at a time sequentially
-    if (this.currentlyProcessing.length === 0) {
-      const pending = this.queue.filter(v => v.status === 'pending');
-      
-      if (pending.length > 0) {
-        const video = pending[0];
-        console.log('[Sora Automation] Processing next video:', video.scene);
-        
-        // Generate the video
-        await this.generateVideo(video);
-        
-        // Navigate to drafts to monitor
-        console.log('[Sora Automation] Navigating to drafts to monitor...');
-        await this.sleep(2000);
-        window.location.href = 'https://sora.chatgpt.com/drafts';
-        await this.waitForPageLoad();
-        await this.sleep(3000);
-        
-        // Monitoring will detect completion and call processQueue again
-      }
-    }
-
-    // Check if queue is complete
-    if (this.queue.length > 0 && 
-        this.queue.every(v => v.status === 'completed' || v.status === 'failed') &&
-        this.currentlyProcessing.length === 0) {
-      this.onQueueComplete();
-    }
-  }
-
-  async generateVideo(video) {
-    console.log('[Sora Automation] ===== GENERATING VIDEO =====');
-    console.log('[Sora Automation] Scene:', video.scene);
-    console.log('[Sora Automation] Full prompt:', video.fullPrompt);
-    
-    video.status = 'processing';
-    this.currentlyProcessing.push(video.id);
-    this.sendStatusUpdate();
-
-    try {
-      // ALWAYS navigate to profile page
-      console.log('[Sora Automation] Navigating to profile page...');
-      window.location.href = 'https://sora.chatgpt.com/profile';
-      await this.waitForPageLoad();
-      console.log('[Sora Automation] Page loaded, waiting 3s for React...');
-      await this.sleep(3000);
-
-      // Find textarea - usando o placeholder exato do HTML
-      console.log('[Sora Automation] Looking for textarea...');
-      
-      let textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
-      
-      if (!textarea) {
-        console.log('[Sora Automation] Exact selector failed, trying alternatives...');
-        // Alternativas
-        const selectors = [
-          'textarea[placeholder*="Describe"]',
-          'textarea[placeholder*="video"]',
-          'textarea',
-          '[contenteditable="true"]'
-        ];
-        
-        for (const selector of selectors) {
-          console.log('[Sora Automation] Trying:', selector);
-          textarea = document.querySelector(selector);
-          if (textarea) {
-            console.log('[Sora Automation] ✅ Found with:', selector);
-            break;
-          }
-        }
-      } else {
-        console.log('[Sora Automation] ✅ Found textarea with exact selector');
-      }
-      
-      if (!textarea) {
-        console.log('[Sora Automation] Waiting 5s more...');
-        await this.sleep(5000);
-        textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
-      }
-      
-      if (!textarea) {
-        const allTextareas = document.querySelectorAll('textarea');
-        console.log('[Sora Automation] Total textareas found:', allTextareas.length);
-        allTextareas.forEach((ta, i) => {
-          console.log(`[Sora Automation] Textarea ${i}:`, {
-            placeholder: ta.placeholder,
-            classes: ta.className,
-            visible: ta.offsetParent !== null
-          });
-        });
-        throw new Error('Textarea not found');
-      }
-
-      // Fill the prompt
-      console.log('[Sora Automation] Filling textarea...');
-      await this.fillTextareaReact(textarea, video.fullPrompt);
-      
-      // Verify
-      console.log('[Sora Automation] Verifying fill...');
-      await this.sleep(1000);
-      console.log('[Sora Automation] Current value length:', textarea.value.length);
-      console.log('[Sora Automation] First 50 chars:', textarea.value.substring(0, 50));
-
-      // Wait for button to enable
-      console.log('[Sora Automation] Waiting for Create button to enable...');
-      await this.sleep(2000);
-
-      // Find Create button - procurar pelo SVG path ou sr-only text
-      const buttons = document.querySelectorAll('button');
-      let createButton = null;
-      
-      for (const btn of buttons) {
-        const srOnly = btn.querySelector('.sr-only');
-        if (srOnly && srOnly.textContent === 'Create video') {
-          createButton = btn;
-          console.log('[Sora Automation] ✅ Found Create button via sr-only');
-          break;
-        }
-      }
-      
-      if (!createButton) {
-        // Procurar por botão com SVG de seta para cima
-        for (const btn of buttons) {
-          const svg = btn.querySelector('svg path[d*="M11.293"]');
-          if (svg) {
-            createButton = btn;
-            console.log('[Sora Automation] ✅ Found Create button via SVG');
-            break;
-          }
-        }
-      }
-
-      if (!createButton) {
-        throw new Error('Create button not found');
-      }
-
-      // Check if button is enabled
-      const isDisabled = createButton.hasAttribute('disabled') || createButton.dataset.disabled === 'true';
-      console.log('[Sora Automation] Button disabled:', isDisabled);
-      
-      if (isDisabled) {
-        console.log('[Sora Automation] Button still disabled, waiting 3s more...');
-        await this.sleep(3000);
-      }
-
-      console.log('[Sora Automation] Clicking Create button...');
-      createButton.click();
-      
-      console.log('[Sora Automation] ✅ Video generation started!');
-      await this.sleep(2000);
-
-    } catch (error) {
-      console.error('[Sora Automation] ❌ Error:', error);
-      this.onVideoError(video, error);
-    }
-  }
-
-  // ========================================
-  // Monitoring
-  // ========================================
-
-  startMonitoring() {
-    if (this.monitoringInterval) {
-      clearInterval(this.monitoringInterval);
-    }
-
-    this.monitoringInterval = setInterval(() => {
-      this.checkVideosStatus();
-    }, this.checkInterval);
-
-    // Also check immediately
-    this.checkVideosStatus();
-  }
-
-  async checkVideosStatus() {
-    if (!this.isMonitoring) return;
-    if (this.currentlyProcessing.length === 0) return;
-
-    console.log('[Sora Automation] Checking videos status...', {
-      currentlyProcessing: this.currentlyProcessing.length,
-      completedVideos: this.completedVideos.length
-    });
-
-    // Navigate to drafts page if needed
-    if (!window.location.href.includes('/drafts')) {
-      window.location.href = 'https://sora.chatgpt.com/drafts';
-      await this.waitForPageLoad();
-    }
-
-    // Find all video thumbnails in drafts
-    const videos = await this.findDraftVideos();
-    
-    // Check which ones are complete (not blurred)
-    const completedVideos = videos.filter(v => !this.isVideoBlurred(v));
-    
-    console.log(`[Sora Automation] Found ${videos.length} total videos, ${completedVideos.length} completed`);
-
-    // Count newly completed videos since last check
-    const newlyCompletedCount = completedVideos.length - this.completedVideos.length;
-    
-    if (newlyCompletedCount > 0) {
-      console.log(`[Sora Automation] ${newlyCompletedCount} new video(s) completed`);
-      
-      // Mark videos as completed (process each newly completed video)
-      for (let i = 0; i < newlyCompletedCount && this.currentlyProcessing.length > 0; i++) {
-        const videoId = this.currentlyProcessing.shift();
-        const video = this.queue.find(v => v.id === videoId);
-        
-        if (video) {
-          video.status = 'completed';
-          this.completedVideos.push(videoId);
-          console.log('[Sora Automation] Video completed:', video.scene);
-          
-          // Auto-download if enabled
-          if (this.settings.autoDownload) {
-            // TODO: Implement auto-download
-            console.log('[Sora Automation] Auto-download not yet implemented');
-          }
-        }
-      }
-
-      this.sendStatusUpdate();
-      
-      // IMPORTANT: Process next video from queue (one at a time)
-      setTimeout(() => {
-        this.processQueue();
-      }, 2000); // Wait 2 seconds before processing next video
-    }
-  }
-
-  async findDraftVideos() {
-    // The drafts page shows videos as thumbnails
-    // We need to find all video containers
-    // Based on the screenshots, videos are in a grid layout
-    
-    const videoContainers = document.querySelectorAll('[class*="draft"], [class*="video"], video, img[src*="blob"]');
-    return Array.from(videoContainers);
-  }
-
-  isVideoBlurred(element) {
-    // Check if video thumbnail is blurred (indicating it's still generating)
-    // This is based on the information that blurred = generating, clear = complete
-    
-    const style = window.getComputedStyle(element);
-    const filter = style.filter;
-    
-    // Check for blur filter
-    if (filter && filter.includes('blur')) {
-      return true;
-    }
-
-    // Check opacity (generating videos might have lower opacity)
-    const opacity = parseFloat(style.opacity);
-    if (opacity < 0.8) {
-      return true;
-    }
-
-    // Check for loading classes
-    const classList = element.classList.toString().toLowerCase();
-    if (classList.includes('loading') || 
-        classList.includes('generating') || 
-        classList.includes('processing')) {
-      return true;
-    }
-
-    // Check if parent has loading indicator
-    const parent = element.parentElement;
-    if (parent) {
-      const parentClass = parent.classList.toString().toLowerCase();
-      if (parentClass.includes('loading') || 
-          parentClass.includes('generating')) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  onVideoError(video, error) {
-    console.error('[Sora Automation] Video error:', error);
-    
-    const index = this.currentlyProcessing.indexOf(video.id);
-    if (index > -1) {
-      this.currentlyProcessing.splice(index, 1);
-    }
-
-    // Retry logic
-    if (this.settings.retryOnError && video.retries < video.maxRetries) {
-      video.retries++;
-      video.status = 'pending';
-      console.log(`[Sora Automation] Retrying video (${video.retries}/${video.maxRetries})`);
-      
-      // Try again after a delay
-      setTimeout(() => {
-        this.processQueue();
-      }, 5000);
-    } else {
-      video.status = 'failed';
-      video.error = error.message;
-    }
-
-    this.sendStatusUpdate();
-  }
-
-  onQueueComplete() {
-    console.log('[Sora Automation] Queue complete!');
-    this.isMonitoring = false;
-    
-    if (this.monitoringInterval) {
-      clearInterval(this.monitoringInterval);
-      this.monitoringInterval = null;
-    }
-
-    chrome.runtime.sendMessage({
-      type: 'QUEUE_COMPLETE',
-      data: {
-        total: this.queue.length,
-        completed: this.queue.filter(v => v.status === 'completed').length,
-        failed: this.queue.filter(v => v.status === 'failed').length
-      }
-    });
-
-    this.sendStatusUpdate();
-  }
-
-  // ========================================
-  // DOM Helpers
-  // ========================================
-
-  async waitForElement(selector, timeout = 10000) {
-    const startTime = Date.now();
-    
-    while (Date.now() - startTime < timeout) {
-      const element = document.querySelector(selector);
-      if (element) return element;
-      await this.sleep(100);
-    }
-    
-    return null;
-  }
-
-  async findCreateButton() {
-    // Try multiple selectors
-    const selectors = [
-      'button[type="submit"]',
-      'button:has-text("Create video")',
-      'button[class*="create"]',
-      'button[class*="generate"]'
-    ];
-
-    for (const selector of selectors) {
       try {
-        const element = document.querySelector(selector);
-        if (element && element.textContent.toLowerCase().includes('create')) {
-          return element;
+        const url = args[0]?.url || args[0];
+
+        // Detectar endpoint de tasks
+        if (typeof url === 'string' && url.includes('/tasks')) {
+          self.tasksEndpoint = url.split('?')[0];
+          self.log(`Endpoint detectado: ${self.tasksEndpoint}`);
+        }
+
+        // Detectar endpoint de drafts
+        if (typeof url === 'string' && url.includes('/draft')) {
+          // Clonar response para ler sem consumir
+          const cloned = response.clone();
+          cloned.json().then(data => {
+            if (data.items) {
+              self.log(`Drafts: ${data.items.length} itens encontrados`);
+            }
+          }).catch(() => {});
         }
       } catch (e) {
-        // Invalid selector, continue
+        // Ignorar erros de parsing
+      }
+
+      return response;
+    };
+  }
+
+  // ========================================
+  // Polling de Tasks
+  // ========================================
+
+  async fetchActiveTasks() {
+    // Tentar buscar tasks ativas da página
+    // O Sora faz polling automático, vamos interceptar ou usar os dados do DOM
+
+    try {
+      // Método 1: Buscar do endpoint se descoberto
+      if (this.tasksEndpoint) {
+        const response = await fetch(this.tasksEndpoint);
+        const data = await response.json();
+
+        if (Array.isArray(data)) {
+          this.activeTasks = data.filter(t =>
+            t.status === 'running' || t.status === 'pending'
+          );
+          return this.activeTasks;
+        }
+      }
+
+      // Método 2: Buscar endpoint genérico de tasks
+      const endpoints = [
+        '/api/tasks',
+        '/v1/tasks',
+        '/tasks'
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint);
+          if (response.ok) {
+            const data = await response.json();
+            if (Array.isArray(data)) {
+              this.activeTasks = data.filter(t =>
+                t.status === 'running' || t.status === 'pending'
+              );
+              this.tasksEndpoint = endpoint;
+              return this.activeTasks;
+            }
+          }
+        } catch (e) {
+          // Continuar tentando outros endpoints
+        }
+      }
+
+      // Método 3: Verificar pelo DOM (indicadores de progresso)
+      const progressIndicators = document.querySelectorAll('[class*="progress"], [class*="generating"], [class*="loading"]');
+      const runningCount = progressIndicators.length;
+
+      // Criar tasks fictícias baseadas no DOM
+      this.activeTasks = [];
+      for (let i = 0; i < runningCount && i < 3; i++) {
+        this.activeTasks.push({
+          id: `dom_task_${i}`,
+          status: 'running'
+        });
+      }
+
+      return this.activeTasks;
+
+    } catch (error) {
+      this.log(`Erro ao buscar tasks: ${error.message}`);
+      return [];
+    }
+  }
+
+  getActiveCount() {
+    return this.activeTasks.filter(t =>
+      t.status === 'running' || t.status === 'pending'
+    ).length;
+  }
+
+  // ========================================
+  // Envio de Prompts
+  // ========================================
+
+  async submitPrompt(prompt) {
+    this.log(`Enviando: "${prompt.substring(0, 50)}..."`);
+
+    try {
+      // Encontrar textarea
+      const textarea = await this.waitForElement('textarea[placeholder="Describe your video..."]', 5000);
+
+      if (!textarea) {
+        throw new Error('Textarea não encontrada');
+      }
+
+      // Preencher textarea (compatível com React)
+      this.fillReactTextarea(textarea, prompt);
+      await this.sleep(500);
+
+      // Encontrar e clicar no botão
+      const createButton = this.findCreateButton();
+
+      if (!createButton) {
+        throw new Error('Botão Create não encontrado');
+      }
+
+      if (createButton.disabled) {
+        this.log('Aguardando botão habilitar...');
+        await this.sleep(2000);
+      }
+
+      createButton.click();
+      this.log('Prompt enviado com sucesso!');
+
+      await this.sleep(1000);
+      return true;
+
+    } catch (error) {
+      this.log(`Erro ao enviar: ${error.message}`);
+      return false;
+    }
+  }
+
+  fillReactTextarea(textarea, text) {
+    textarea.focus();
+    textarea.value = '';
+
+    // Usar setter nativo para React detectar
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype, 'value'
+    ).set;
+
+    nativeSetter.call(textarea, text);
+
+    // Disparar eventos necessários
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  findCreateButton() {
+    // Procurar pelo sr-only text
+    const buttons = document.querySelectorAll('button');
+
+    for (const btn of buttons) {
+      const srOnly = btn.querySelector('.sr-only');
+      if (srOnly && srOnly.textContent.includes('Create')) {
+        return btn;
       }
     }
 
-    // Fallback: find by text content
-    const buttons = document.querySelectorAll('button');
-    for (const button of buttons) {
-      if (button.textContent.toLowerCase().includes('create video')) {
-        return button;
+    // Fallback: procurar por atributos comuns
+    for (const btn of buttons) {
+      if (btn.querySelector('svg') && !btn.disabled) {
+        const rect = btn.getBoundingClientRect();
+        // Geralmente é um botão pequeno no canto
+        if (rect.width < 60 && rect.height < 60) {
+          return btn;
+        }
       }
     }
 
     return null;
   }
 
-  async fillTextareaReact(textarea, text) {
-    console.log('[Sora Automation] fillTextareaReact - text length:', text.length);
-    
-    // Focus the textarea
-    textarea.focus();
-    textarea.click();
-    
-    // Clear existing value
-    textarea.value = '';
-    
-    // Use React's native value setter
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      'value'
-    ).set;
-    
-    nativeInputValueSetter.call(textarea, text);
-    
-    // Dispatch input event (React listens to this)
-    const inputEvent = new Event('input', { bubbles: true, cancelable: true });
-    textarea.dispatchEvent(inputEvent);
-    
-    // Also dispatch change event
-    const changeEvent = new Event('change', { bubbles: true, cancelable: true });
-    textarea.dispatchEvent(changeEvent);
-    
-    // Simulate typing for extra React detection
-    const keydownEvent = new KeyboardEvent('keydown', { 
-      bubbles: true, 
-      cancelable: true,
-      key: 'a',
-      code: 'KeyA'
-    });
-    textarea.dispatchEvent(keydownEvent);
-    
-    const keyupEvent = new KeyboardEvent('keyup', { 
-      bubbles: true, 
-      cancelable: true,
-      key: 'a',
-      code: 'KeyA'
-    });
-    textarea.dispatchEvent(keyupEvent);
-    
-    // Wait a bit for React to process
-    await this.sleep(500);
-    
-    console.log('[Sora Automation] fillTextareaReact - value after fill:', textarea.value.substring(0, 50));
+  // ========================================
+  // Loop Principal
+  // ========================================
+
+  async startProcessing() {
+    if (this.isRunning) return;
+
+    this.isRunning = true;
+    this.isPaused = false;
+    this.log('Processamento iniciado');
+    this.updateUI();
+
+    this.pollingTimer = setInterval(() => this.processLoop(), this.pollingInterval);
+
+    // Executar imediatamente também
+    await this.processLoop();
   }
 
-  fillTextarea(textarea, text) {
-    console.log('[Sora Automation] fillTextarea called with text length:', text.length);
-    
-    // Focus first
-    textarea.focus();
-    
-    // Method 1: Clear existing value
-    textarea.value = '';
-    
-    // Method 2: Use native setter (for React)
-    try {
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        'value'
-      ).set;
-      nativeInputValueSetter.call(textarea, text);
-      console.log('[Sora Automation] Native setter called');
-    } catch (e) {
-      console.warn('[Sora Automation] Native setter failed:', e);
+  async processLoop() {
+    if (!this.isRunning || this.isPaused) return;
+    if (this.queue.length === 0) {
+      this.log('Fila vazia - processamento concluído');
+      this.stop();
+      return;
     }
-    
-    // Method 3: Direct assignment
-    textarea.value = text;
-    
-    // Method 4: Simulate typing (for contenteditable)
-    if (textarea.getAttribute('contenteditable') === 'true') {
-      textarea.textContent = text;
-      textarea.innerText = text;
-    }
-    
-    // Trigger ALL possible events for React
-    const events = [
-      new Event('input', { bubbles: true, cancelable: true }),
-      new Event('change', { bubbles: true, cancelable: true }),
-      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'a' }),
-      new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'a' }),
-      new Event('blur', { bubbles: true, cancelable: true })
-    ];
-    
-    events.forEach(event => {
-      textarea.dispatchEvent(event);
-    });
-    
-    console.log('[Sora Automation] All events dispatched');
-    console.log('[Sora Automation] Final textarea value:', textarea.value.substring(0, 50) + '...');
-  }
 
-  async waitForPageLoad() {
-    return new Promise(resolve => {
-      if (document.readyState === 'complete') {
-        resolve();
+    // Buscar tasks ativas
+    await this.fetchActiveTasks();
+    const activeCount = this.getActiveCount();
+
+    this.log(`Tasks ativas: ${activeCount}/3`);
+    this.updateUI();
+
+    // Enviar prompts se houver slots disponíveis
+    while (activeCount + this.activeTasks.length < this.maxConcurrent && this.queue.length > 0) {
+      if (!this.isRunning || this.isPaused) break;
+
+      const prompt = this.queue.shift();
+      const success = await this.submitPrompt(prompt);
+
+      if (success) {
+        this.completedCount++;
+        // Adicionar task fictícia para não enviar demais
+        this.activeTasks.push({
+          id: `submitted_${Date.now()}`,
+          status: 'pending'
+        });
       } else {
-        window.addEventListener('load', resolve);
+        // Devolver à fila em caso de erro
+        this.queue.unshift(prompt);
+        break;
+      }
+
+      this.saveToStorage();
+      this.updateUI();
+
+      // Pequena pausa entre submissões
+      await this.sleep(2000);
+    }
+  }
+
+  pause() {
+    this.isPaused = true;
+    this.log('Pausado');
+    this.updateUI();
+  }
+
+  resume() {
+    this.isPaused = false;
+    this.log('Retomado');
+    this.updateUI();
+    this.processLoop();
+  }
+
+  stop() {
+    this.isRunning = false;
+    this.isPaused = false;
+
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
+    }
+
+    this.log('Parado');
+    this.updateUI();
+  }
+
+  clearQueue() {
+    this.queue = [];
+    this.completedCount = 0;
+    this.saveToStorage();
+    this.log('Fila limpa');
+    this.updateUI();
+  }
+
+  // ========================================
+  // Persistência (localStorage)
+  // ========================================
+
+  saveToStorage() {
+    const data = {
+      queue: this.queue,
+      completedCount: this.completedCount
+    };
+    localStorage.setItem('sora_queue_manager', JSON.stringify(data));
+  }
+
+  loadFromStorage() {
+    try {
+      const data = localStorage.getItem('sora_queue_manager');
+      if (data) {
+        const parsed = JSON.parse(data);
+        this.queue = parsed.queue || [];
+        this.completedCount = parsed.completedCount || 0;
+
+        if (this.queue.length > 0) {
+          this.log(`Fila restaurada: ${this.queue.length} prompts`);
+        }
+      }
+    } catch (e) {
+      this.queue = [];
+      this.completedCount = 0;
+    }
+  }
+
+  // ========================================
+  // UI - Painel Flutuante
+  // ========================================
+
+  createPanel() {
+    // Criar container do painel
+    const panel = document.createElement('div');
+    panel.id = 'sora-queue-panel';
+    panel.innerHTML = `
+      <div class="sqm-header">
+        <span class="sqm-title">🎬 Sora Queue Manager</span>
+        <button class="sqm-toggle" id="sqm-toggle">−</button>
+      </div>
+
+      <div class="sqm-body" id="sqm-body">
+        <div class="sqm-section">
+          <label>Prompts (um por linha):</label>
+          <textarea id="sqm-prompts" placeholder="Digite seus prompts aqui...&#10;Um prompt por linha&#10;Pressione Enter para nova linha"></textarea>
+          <div class="sqm-prompt-count">
+            <span id="sqm-count">0</span> prompts na fila
+          </div>
+        </div>
+
+        <div class="sqm-status">
+          <div class="sqm-status-item">
+            <span class="sqm-label">Tasks ativas:</span>
+            <span class="sqm-value" id="sqm-active">0/3</span>
+          </div>
+          <div class="sqm-status-item">
+            <span class="sqm-label">Na fila:</span>
+            <span class="sqm-value" id="sqm-queued">0</span>
+          </div>
+          <div class="sqm-status-item">
+            <span class="sqm-label">Concluídos:</span>
+            <span class="sqm-value" id="sqm-completed">0</span>
+          </div>
+        </div>
+
+        <div class="sqm-buttons">
+          <button class="sqm-btn sqm-btn-primary" id="sqm-start">▶ Iniciar</button>
+          <button class="sqm-btn sqm-btn-secondary" id="sqm-pause" disabled>⏸ Pausar</button>
+          <button class="sqm-btn sqm-btn-danger" id="sqm-stop" disabled>⏹ Parar</button>
+          <button class="sqm-btn sqm-btn-secondary" id="sqm-clear">🗑 Limpar</button>
+        </div>
+
+        <div class="sqm-log-section">
+          <label>Log:</label>
+          <div class="sqm-log" id="sqm-log"></div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    this.panel = panel;
+
+    // Event listeners
+    this.setupEventListeners();
+    this.updateUI();
+  }
+
+  setupEventListeners() {
+    // Toggle minimizar
+    document.getElementById('sqm-toggle').addEventListener('click', () => {
+      const body = document.getElementById('sqm-body');
+      const toggle = document.getElementById('sqm-toggle');
+
+      if (body.style.display === 'none') {
+        body.style.display = 'block';
+        toggle.textContent = '−';
+      } else {
+        body.style.display = 'none';
+        toggle.textContent = '+';
       }
     });
+
+    // Textarea - contar prompts
+    const textarea = document.getElementById('sqm-prompts');
+    textarea.addEventListener('input', () => {
+      const lines = textarea.value.split('\n').filter(l => l.trim());
+      document.getElementById('sqm-count').textContent = lines.length;
+    });
+
+    // Botão Iniciar
+    document.getElementById('sqm-start').addEventListener('click', () => {
+      const textarea = document.getElementById('sqm-prompts');
+      const prompts = textarea.value.split('\n').filter(l => l.trim());
+
+      if (prompts.length === 0) {
+        this.log('Adicione prompts antes de iniciar');
+        return;
+      }
+
+      this.queue = prompts;
+      this.completedCount = 0;
+      this.saveToStorage();
+      textarea.value = '';
+      document.getElementById('sqm-count').textContent = '0';
+
+      this.startProcessing();
+    });
+
+    // Botão Pausar/Retomar
+    document.getElementById('sqm-pause').addEventListener('click', () => {
+      if (this.isPaused) {
+        this.resume();
+      } else {
+        this.pause();
+      }
+    });
+
+    // Botão Parar
+    document.getElementById('sqm-stop').addEventListener('click', () => {
+      this.stop();
+    });
+
+    // Botão Limpar
+    document.getElementById('sqm-clear').addEventListener('click', () => {
+      this.clearQueue();
+      document.getElementById('sqm-prompts').value = '';
+      document.getElementById('sqm-count').textContent = '0';
+    });
+  }
+
+  updateUI() {
+    const activeCount = this.getActiveCount();
+
+    // Atualizar status
+    document.getElementById('sqm-active').textContent = `${activeCount}/3`;
+    document.getElementById('sqm-queued').textContent = this.queue.length;
+    document.getElementById('sqm-completed').textContent = this.completedCount;
+
+    // Atualizar botões
+    const startBtn = document.getElementById('sqm-start');
+    const pauseBtn = document.getElementById('sqm-pause');
+    const stopBtn = document.getElementById('sqm-stop');
+
+    if (this.isRunning) {
+      startBtn.disabled = true;
+      pauseBtn.disabled = false;
+      stopBtn.disabled = false;
+      pauseBtn.textContent = this.isPaused ? '▶ Retomar' : '⏸ Pausar';
+    } else {
+      startBtn.disabled = false;
+      pauseBtn.disabled = true;
+      stopBtn.disabled = true;
+      pauseBtn.textContent = '⏸ Pausar';
+    }
+
+    // Indicador visual de status
+    const header = this.panel.querySelector('.sqm-header');
+    header.classList.remove('running', 'paused');
+
+    if (this.isRunning && !this.isPaused) {
+      header.classList.add('running');
+    } else if (this.isPaused) {
+      header.classList.add('paused');
+    }
+  }
+
+  // ========================================
+  // Utilidades
+  // ========================================
+
+  log(message) {
+    const timestamp = new Date().toLocaleTimeString('pt-BR');
+    const logEntry = `[${timestamp}] ${message}`;
+
+    console.log(`[SoraQM] ${message}`);
+
+    const logDiv = document.getElementById('sqm-log');
+    if (logDiv) {
+      const entry = document.createElement('div');
+      entry.className = 'sqm-log-entry';
+      entry.textContent = logEntry;
+      logDiv.appendChild(entry);
+      logDiv.scrollTop = logDiv.scrollHeight;
+
+      // Limitar a 100 entradas
+      while (logDiv.children.length > 100) {
+        logDiv.removeChild(logDiv.firstChild);
+      }
+    }
+  }
+
+  async waitForElement(selector, timeout = 10000) {
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      const element = document.querySelector(selector);
+      if (element) return element;
+      await this.sleep(200);
+    }
+
+    return null;
   }
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
-
-  // ========================================
-  // Status Updates
-  // ========================================
-
-  getStatus() {
-    return {
-      isMonitoring: this.isMonitoring,
-      queue: this.queue,
-      currentlyProcessing: this.currentlyProcessing,
-      completedVideos: this.completedVideos,
-      stats: {
-        total: this.queue.length,
-        pending: this.queue.filter(v => v.status === 'pending').length,
-        processing: this.currentlyProcessing.length,
-        completed: this.queue.filter(v => v.status === 'completed').length,
-        failed: this.queue.filter(v => v.status === 'failed').length
-      }
-    };
-  }
-
-  sendStatusUpdate() {
-    const status = this.getStatus();
-    
-    // Send to background script
-    chrome.runtime.sendMessage({
-      type: 'STATUS_UPDATE',
-      data: status
-    });
-  }
 }
 
-// Initialize
-console.log('[Sora Automation] ===== SCRIPT LOADED =====');
-console.log('[Sora Automation] Creating SoraAutomation instance...');
-const soraAutomation = new SoraAutomation();
-console.log('[Sora Automation] ===== READY =====');
+// ========================================
+// Inicialização
+// ========================================
+
+// Aguardar DOM estar pronto
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    window.soraQueueManager = new SoraQueueManager();
+  });
+} else {
+  window.soraQueueManager = new SoraQueueManager();
+}
