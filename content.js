@@ -3,6 +3,8 @@
 // Gerenciador de fila com máximo 3 gerações simultâneas
 // ========================================
 
+console.log('%c[Sora Queue Manager] Script carregado!', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
+
 class SoraQueueManager {
   constructor() {
     this.queue = [];
@@ -352,6 +354,8 @@ class SoraQueueManager {
   // ========================================
 
   createPanel() {
+    console.log('[SoraQM] Criando painel...');
+
     // Criar container do painel
     const panel = document.createElement('div');
     panel.id = 'sora-queue-panel';
