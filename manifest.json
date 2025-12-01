@@ -7,11 +7,11 @@
     "storage"
   ],
   "host_permissions": [
-    "https://sora.com/*"
+    "https://sora.chatgpt.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://sora.com/*"],
+      "matches": ["https://sora.chatgpt.com/*"],
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_end"
