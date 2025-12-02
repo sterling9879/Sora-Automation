@@ -49,7 +49,8 @@ class SoraQueueManager {
       return false;
     }
 
-    // Preencher
+    // Focar e preencher
+    textarea.focus();
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
     if (setter) {
       setter.call(textarea, prompt);
@@ -57,16 +58,43 @@ class SoraQueueManager {
       textarea.value = prompt;
     }
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
 
-    await this.sleep(800);
+    await this.sleep(1000);
 
-    // Achar botao
+    // Achar botao - tentar varios metodos
     let btn = null;
+
+    // Metodo 1: sr-only com Create
     for (const b of document.querySelectorAll('button')) {
       const sr = b.querySelector('.sr-only');
       if (sr && sr.textContent.includes('Create')) {
         btn = b;
         break;
+      }
+    }
+
+    // Metodo 2: botao com SVG perto do textarea
+    if (!btn) {
+      const form = textarea.closest('form') || textarea.parentElement?.parentElement;
+      if (form) {
+        const btns = form.querySelectorAll('button');
+        for (const b of btns) {
+          if (b.querySelector('svg')) {
+            btn = b;
+            break;
+          }
+        }
+      }
+    }
+
+    // Metodo 3: qualquer botao com SVG
+    if (!btn) {
+      for (const b of document.querySelectorAll('button')) {
+        if (b.querySelector('svg') && !b.textContent.trim()) {
+          btn = b;
+          break;
+        }
       }
     }
 
@@ -76,8 +104,8 @@ class SoraQueueManager {
     }
 
     // Esperar habilitar
-    for (let i = 0; i < 10 && btn.disabled; i++) {
-      await this.sleep(300);
+    for (let i = 0; i < 15 && btn.disabled; i++) {
+      await this.sleep(200);
     }
 
     if (btn.disabled) {
