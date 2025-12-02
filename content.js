@@ -247,14 +247,19 @@ class SoraQueueManager {
       .sqm-log div{margin:2px 0;color:#a0a0c0}`;
     document.head.appendChild(s);
 
-    document.getElementById('sqm-toggle').onclick = () => {
+    const self = this;
+    document.getElementById('sqm-toggle').onclick = function() {
       const b = document.getElementById('sqm-body');
       b.style.display = b.style.display === 'none' ? 'block' : 'none';
     };
-    document.getElementById('sqm-start').onclick = () => this.start();
-    document.getElementById('sqm-stop').onclick = () => this.stop();
-    document.getElementById('sqm-clear').onclick = () => this.clear();
+    document.getElementById('sqm-start').onclick = function() {
+      console.log('[SoraQM] Botao Iniciar clicado!');
+      self.start();
+    };
+    document.getElementById('sqm-stop').onclick = function() { self.stop(); };
+    document.getElementById('sqm-clear').onclick = function() { self.clear(); };
     this.updateUI();
+    console.log('[SoraQM] Painel criado com sucesso!');
   }
 
   updateUI() {
