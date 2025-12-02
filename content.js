@@ -1,9 +1,9 @@
 // ========================================
-// SORA QUEUE MANAGER v3 - Content Script
-// Gerenciador de fila com máximo 3 gerações simultâneas
+// SORA QUEUE MANAGER v4 - Content Script
+// Gerenciador de fila usando endpoint de DRAFTS
 // ========================================
 
-console.log('%c[Sora Queue Manager] Script carregado!', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
+console.log('%c[Sora Queue Manager v4] Script carregado!', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
 
 class SoraQueueManager {
   constructor() {
@@ -14,29 +14,33 @@ class SoraQueueManager {
     this.pollingInterval = 5000; // 5 segundos
     this.pollingTimer = null;
 
-    // Tasks ativas (do endpoint)
-    this.activeTasks = [];
-    this.completedCount = 0;
+    // Prompts enviados mas ainda não apareceram nos drafts
+    this.submittedPrompts = [];
 
-    // Endpoints descobertos
-    this.tasksEndpoint = null;
+    // Endpoint de drafts
+    this.draftsEndpoint = '/backend-api/v1/draft?limit=20';
+
+    // Prompts já vistos nos drafts (para comparar)
+    this.knownDraftPrompts = new Set();
+
+    this.completedCount = 0;
 
     this.init();
   }
 
   init() {
-    console.log('[SoraQM] Inicializando...');
+    console.log('[SoraQM] Inicializando v4...');
     this.loadFromStorage();
     this.interceptFetch();
     this.createPanel();
-    this.log('Extensão iniciada');
+    this.log('Extensao iniciada v4');
 
-    // Tentar descobrir endpoint de tasks
-    setTimeout(() => this.discoverTasksEndpoint(), 2000);
+    // Descobrir endpoint de drafts automaticamente
+    this.discoverDraftsEndpoint();
   }
 
   // ========================================
-  // Interceptação de Fetch
+  // Interceptacao de Fetch para descobrir endpoint
   // ========================================
 
   interceptFetch() {
@@ -49,20 +53,17 @@ class SoraQueueManager {
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
 
-        if (url) {
-          // Detectar endpoint de tasks (array de tasks ativas)
-          if (url.includes('/video_gen/tasks') || (url.includes('/tasks') && !url.includes('drafts'))) {
-            self.tasksEndpoint = url.split('?')[0];
-            console.log('[SoraQM] Tasks endpoint detectado:', self.tasksEndpoint);
+        if (url && url.includes('/draft')) {
+          // Capturar endpoint de drafts
+          const baseUrl = url.split('?')[0];
+          self.draftsEndpoint = url;
+          console.log('[SoraQM] Drafts endpoint detectado:', url);
 
-            // Capturar dados das tasks
-            const cloned = response.clone();
-            cloned.json().then(data => {
-              if (Array.isArray(data)) {
-                self.processTasksResponse(data);
-              }
-            }).catch(() => {});
-          }
+          // Capturar dados dos drafts
+          const cloned = response.clone();
+          cloned.json().then(data => {
+            self.processDraftsResponse(data);
+          }).catch(() => {});
         }
       } catch (e) {
         console.error('[SoraQM] Erro ao interceptar:', e);
@@ -72,15 +73,19 @@ class SoraQueueManager {
     };
   }
 
-  async discoverTasksEndpoint() {
-    this.log('Buscando endpoint de tasks...');
+  async discoverDraftsEndpoint() {
+    this.log('Detectando endpoint de drafts...');
 
-    // Tentar endpoints comuns
+    // Verificar se estamos na pagina de drafts
+    if (!window.location.href.includes('/drafts')) {
+      this.log('Navegue para /drafts antes de iniciar');
+    }
+
+    // Tentar buscar drafts
     const endpoints = [
-      '/backend-api/v1/video_gen/tasks',
-      '/sora/backend-api/v1/video_gen/tasks',
-      '/api/v1/video_gen/tasks',
-      '/v1/video_gen/tasks'
+      '/backend-api/v1/draft?limit=20',
+      '/sora/backend-api/v1/draft?limit=20',
+      '/api/v1/draft?limit=20'
     ];
 
     for (const endpoint of endpoints) {
@@ -88,62 +93,87 @@ class SoraQueueManager {
         const response = await fetch(endpoint);
         if (response.ok) {
           const data = await response.json();
-          if (Array.isArray(data)) {
-            this.tasksEndpoint = endpoint;
-            this.processTasksResponse(data);
-            this.log(`Endpoint encontrado: ${endpoint}`);
+          if (data && (Array.isArray(data) || data.items)) {
+            this.draftsEndpoint = endpoint;
+            this.processDraftsResponse(data);
+            this.log('Endpoint de drafts OK!');
             return;
           }
         }
       } catch (e) {
-        // Tentar próximo
+        // Tentar proximo
+      }
+    }
+  }
+
+  processDraftsResponse(data) {
+    // Extrair prompts dos drafts
+    let drafts = [];
+
+    if (Array.isArray(data)) {
+      drafts = data;
+    } else if (data.items && Array.isArray(data.items)) {
+      drafts = data.items;
+    } else if (data.drafts && Array.isArray(data.drafts)) {
+      drafts = data.drafts;
+    }
+
+    // Guardar prompts conhecidos
+    const currentPrompts = new Set();
+
+    drafts.forEach(draft => {
+      const prompt = draft.prompt || draft.text || draft.description;
+      if (prompt) {
+        currentPrompts.add(prompt.trim().toLowerCase());
+      }
+    });
+
+    // Verificar se algum prompt enviado agora aparece nos drafts
+    const stillPending = [];
+
+    for (const submitted of this.submittedPrompts) {
+      const normalizedSubmitted = submitted.trim().toLowerCase();
+
+      if (currentPrompts.has(normalizedSubmitted)) {
+        // Prompt apareceu nos drafts = concluido!
+        this.log(`Concluido: "${submitted.substring(0, 30)}..."`);
+        this.completedCount++;
+      } else {
+        // Ainda pendente
+        stillPending.push(submitted);
       }
     }
 
-    this.log('Aguardando detecção automática do endpoint...');
-  }
+    this.submittedPrompts = stillPending;
+    this.knownDraftPrompts = currentPrompts;
 
-  processTasksResponse(tasks) {
-    // Filtrar tasks ativas (não concluídas/falhas)
-    const activeStatuses = ['preprocessing', 'pending', 'running', 'queued', 'processing'];
-
-    this.activeTasks = tasks.filter(t =>
-      activeStatuses.includes(t.status?.toLowerCase())
-    );
-
-    const count = this.activeTasks.length;
-    console.log(`[SoraQM] Tasks ativas: ${count}/3`, this.activeTasks.map(t => t.status));
-
+    console.log(`[SoraQM] Drafts processados. Pendentes: ${this.submittedPrompts.length}`);
     this.updateUI();
   }
 
   // ========================================
-  // Monitoramento de Tasks
+  // Monitoramento via Drafts
   // ========================================
 
-  async fetchActiveTasks() {
-    if (!this.tasksEndpoint) {
-      console.log('[SoraQM] Endpoint de tasks não descoberto ainda');
-      return this.activeTasks.length;
-    }
-
+  async fetchDrafts() {
     try {
-      const response = await fetch(this.tasksEndpoint);
+      const response = await fetch(this.draftsEndpoint);
       if (response.ok) {
         const data = await response.json();
-        if (Array.isArray(data)) {
-          this.processTasksResponse(data);
-        }
+        this.processDraftsResponse(data);
       }
     } catch (e) {
-      console.error('[SoraQM] Erro ao buscar tasks:', e);
+      console.error('[SoraQM] Erro ao buscar drafts:', e);
     }
-
-    return this.activeTasks.length;
   }
 
   getActiveCount() {
-    return this.activeTasks.length;
+    // Quantidade de prompts enviados que ainda nao apareceram nos drafts
+    return this.submittedPrompts.length;
+  }
+
+  getAvailableSlots() {
+    return this.maxConcurrent - this.getActiveCount();
   }
 
   // ========================================
@@ -162,7 +192,7 @@ class SoraQueueManager {
       }
 
       if (!textarea) {
-        throw new Error('Textarea não encontrada');
+        throw new Error('Textarea nao encontrada');
       }
 
       // Preencher textarea
@@ -172,37 +202,40 @@ class SoraQueueManager {
       // Verificar se preencheu
       console.log('[SoraQM] Valor do textarea:', textarea.value.substring(0, 50));
 
-      // Encontrar botão Create
+      // Encontrar botao Create
       const createButton = this.findCreateButton();
 
       if (!createButton) {
-        throw new Error('Botão Create não encontrado');
+        throw new Error('Botao Create nao encontrado');
       }
 
-      // Aguardar botão estar habilitado
+      // Aguardar botao estar habilitado
       let attempts = 0;
       while (createButton.disabled && attempts < 10) {
-        console.log('[SoraQM] Botão desabilitado, aguardando...');
+        console.log('[SoraQM] Botao desabilitado, aguardando...');
         await this.sleep(500);
         attempts++;
       }
 
       if (createButton.disabled) {
-        throw new Error('Botão Create continua desabilitado');
+        throw new Error('Botao Create continua desabilitado');
       }
 
-      // Clicar no botão
-      console.log('[SoraQM] Clicando no botão Create...');
+      // Clicar no botao
+      console.log('[SoraQM] Clicando no botao Create...');
       createButton.click();
 
-      this.log('✓ Prompt enviado!');
-      this.completedCount++;
+      // Adicionar aos prompts enviados (para tracking)
+      this.submittedPrompts.push(prompt);
+
+      this.log('Prompt enviado! Aguardando aparecer nos drafts...');
+      this.saveToStorage();
 
       await this.sleep(2000);
       return true;
 
     } catch (error) {
-      this.log(`✗ Erro: ${error.message}`);
+      this.log(`Erro: ${error.message}`);
       return false;
     }
   }
@@ -238,16 +271,16 @@ class SoraQueueManager {
   findCreateButton() {
     const buttons = document.querySelectorAll('button');
 
-    // Método 1: Procurar por sr-only com texto "Create video"
+    // Metodo 1: Procurar por sr-only com texto "Create video"
     for (const btn of buttons) {
       const srOnly = btn.querySelector('.sr-only');
       if (srOnly && srOnly.textContent.includes('Create')) {
-        console.log('[SoraQM] Botão encontrado via sr-only');
+        console.log('[SoraQM] Botao encontrado via sr-only');
         return btn;
       }
     }
 
-    // Método 2: Botão com SVG próximo do textarea
+    // Metodo 2: Botao com SVG proximo do textarea
     const textarea = document.querySelector('textarea');
     if (textarea) {
       const container = textarea.closest('form') || textarea.closest('div');
@@ -255,17 +288,17 @@ class SoraQueueManager {
         const btns = container.querySelectorAll('button');
         for (const btn of btns) {
           if (btn.querySelector('svg') && !btn.disabled) {
-            console.log('[SoraQM] Botão encontrado via container');
+            console.log('[SoraQM] Botao encontrado via container');
             return btn;
           }
         }
       }
     }
 
-    // Método 3: Qualquer botão com SVG que não esteja desabilitado
+    // Metodo 3: Qualquer botao com SVG que nao esteja desabilitado
     for (const btn of buttons) {
       if (btn.querySelector('svg') && !btn.textContent.trim()) {
-        console.log('[SoraQM] Botão encontrado via SVG');
+        console.log('[SoraQM] Botao encontrado via SVG');
         return btn;
       }
     }
@@ -280,14 +313,42 @@ class SoraQueueManager {
   async startProcessing() {
     if (this.isRunning) return;
 
+    // Verificar se estamos na pagina correta
+    if (!window.location.href.includes('sora.chatgpt.com')) {
+      this.log('Erro: Nao estamos no Sora');
+      return;
+    }
+
+    // Navegar para drafts para garantir acesso ao endpoint
+    if (!window.location.href.includes('/drafts')) {
+      this.log('Navegando para /drafts...');
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
     this.isRunning = true;
     this.isPaused = false;
-    this.completedCount = 0;
-    this.log('▶ Processamento iniciado');
+    this.log('Processamento iniciado!');
     this.updateUI();
 
-    // Buscar tasks atuais primeiro
-    await this.fetchActiveTasks();
+    // Buscar estado inicial dos drafts
+    await this.fetchDrafts();
+
+    // Esperar um pouco para garantir que estamos prontos
+    await this.sleep(1000);
+
+    // Navegar para a pagina principal para criar videos
+    this.log('Indo para pagina principal...');
+    window.location.href = 'https://sora.chatgpt.com/';
+
+    // O loop sera retomado apos a navegacao
+    this.saveToStorage();
+  }
+
+  async continueProcessing() {
+    if (!this.isRunning || this.isPaused) return;
+
+    this.log('Continuando processamento...');
 
     // Iniciar loop
     this.processLoop();
@@ -297,12 +358,13 @@ class SoraQueueManager {
   async processLoop() {
     if (!this.isRunning || this.isPaused) return;
 
-    // Buscar tasks ativas
-    await this.fetchActiveTasks();
-    const activeCount = this.getActiveCount();
-    const slotsAvailable = this.maxConcurrent - activeCount;
+    // Buscar estado atual dos drafts
+    await this.fetchDrafts();
 
-    this.log(`Slots disponíveis: ${slotsAvailable}/3 | Fila: ${this.queue.length}`);
+    const activeCount = this.getActiveCount();
+    const slotsAvailable = this.getAvailableSlots();
+
+    this.log(`Slots: ${slotsAvailable}/${this.maxConcurrent} | Fila: ${this.queue.length} | Gerando: ${activeCount}`);
     this.updateUI();
 
     // Enviar prompts enquanto houver slots
@@ -311,7 +373,7 @@ class SoraQueueManager {
       const success = await this.submitPrompt(prompt);
 
       if (!success) {
-        // Devolver à fila
+        // Devolver a fila
         this.queue.unshift(prompt);
       }
 
@@ -320,29 +382,28 @@ class SoraQueueManager {
     }
 
     // Verificar se acabou
-    if (this.queue.length === 0) {
-      this.log('✓ Fila vazia!');
-      // Não parar ainda - aguardar tasks terminarem
+    if (this.queue.length === 0 && this.getActiveCount() === 0) {
+      this.log('Todas as tarefas concluidas!');
+      this.stop();
     }
   }
 
   async checkAndProcess() {
     if (!this.isRunning || this.isPaused) return;
 
-    // Buscar estado atual das tasks
-    await this.fetchActiveTasks();
+    // Buscar estado atual dos drafts
+    await this.fetchDrafts();
 
-    // Se tem slots disponíveis e fila, processar
-    const activeCount = this.getActiveCount();
-    const slotsAvailable = this.maxConcurrent - activeCount;
+    // Se tem slots disponiveis e fila, processar
+    const slotsAvailable = this.getAvailableSlots();
 
     if (slotsAvailable > 0 && this.queue.length > 0) {
       await this.processLoop();
     }
 
     // Verificar se tudo terminou
-    if (this.queue.length === 0 && activeCount === 0 && this.isRunning) {
-      this.log('✓ Todas as tasks concluídas!');
+    if (this.queue.length === 0 && this.getActiveCount() === 0 && this.isRunning) {
+      this.log('Todas as tarefas concluidas!');
       this.stop();
     }
 
@@ -351,13 +412,13 @@ class SoraQueueManager {
 
   pause() {
     this.isPaused = true;
-    this.log('⏸ Pausado');
+    this.log('Pausado');
     this.updateUI();
   }
 
   resume() {
     this.isPaused = false;
-    this.log('▶ Retomado');
+    this.log('Retomado');
     this.updateUI();
     this.processLoop();
   }
@@ -365,32 +426,37 @@ class SoraQueueManager {
   stop() {
     this.isRunning = false;
     this.isPaused = false;
+    this.submittedPrompts = [];
 
     if (this.pollingTimer) {
       clearInterval(this.pollingTimer);
       this.pollingTimer = null;
     }
 
-    this.log('⏹ Parado');
+    this.log('Parado');
+    this.saveToStorage();
     this.updateUI();
   }
 
   clearQueue() {
     this.queue = [];
+    this.submittedPrompts = [];
     this.completedCount = 0;
     this.saveToStorage();
-    this.log('🗑 Fila limpa');
+    this.log('Fila limpa');
     this.updateUI();
   }
 
   // ========================================
-  // Persistência
+  // Persistencia
   // ========================================
 
   saveToStorage() {
     const data = {
       queue: this.queue,
-      completedCount: this.completedCount
+      submittedPrompts: this.submittedPrompts,
+      completedCount: this.completedCount,
+      isRunning: this.isRunning
     };
     localStorage.setItem('sora_queue_manager', JSON.stringify(data));
   }
@@ -401,7 +467,15 @@ class SoraQueueManager {
       if (data) {
         const parsed = JSON.parse(data);
         this.queue = parsed.queue || [];
+        this.submittedPrompts = parsed.submittedPrompts || [];
         this.completedCount = parsed.completedCount || 0;
+
+        // Se estava rodando, continuar
+        if (parsed.isRunning) {
+          this.isRunning = true;
+          console.log('[SoraQM] Retomando processamento...');
+          setTimeout(() => this.continueProcessing(), 2000);
+        }
 
         if (this.queue.length > 0) {
           console.log(`[SoraQM] Fila restaurada: ${this.queue.length} prompts`);
@@ -409,6 +483,7 @@ class SoraQueueManager {
       }
     } catch (e) {
       this.queue = [];
+      this.submittedPrompts = [];
       this.completedCount = 0;
     }
   }
@@ -424,8 +499,8 @@ class SoraQueueManager {
     panel.id = 'sora-queue-panel';
     panel.innerHTML = `
       <div class="sqm-header">
-        <span class="sqm-title">🎬 Sora Queue</span>
-        <button class="sqm-toggle" id="sqm-toggle">−</button>
+        <span class="sqm-title">Sora Queue v4</span>
+        <button class="sqm-toggle" id="sqm-toggle">-</button>
       </div>
 
       <div class="sqm-body" id="sqm-body">
@@ -447,16 +522,16 @@ class SoraQueueManager {
             <span class="sqm-value" id="sqm-queued">0</span>
           </div>
           <div class="sqm-status-item">
-            <span class="sqm-label">Enviados</span>
+            <span class="sqm-label">Concluidos</span>
             <span class="sqm-value" id="sqm-completed">0</span>
           </div>
         </div>
 
         <div class="sqm-buttons">
-          <button class="sqm-btn sqm-btn-primary" id="sqm-start">▶ Iniciar</button>
-          <button class="sqm-btn sqm-btn-secondary" id="sqm-pause" disabled>⏸ Pausar</button>
-          <button class="sqm-btn sqm-btn-danger" id="sqm-stop" disabled>⏹ Parar</button>
-          <button class="sqm-btn sqm-btn-secondary" id="sqm-clear">🗑 Limpar</button>
+          <button class="sqm-btn sqm-btn-primary" id="sqm-start">Iniciar</button>
+          <button class="sqm-btn sqm-btn-secondary" id="sqm-pause" disabled>Pausar</button>
+          <button class="sqm-btn sqm-btn-danger" id="sqm-stop" disabled>Parar</button>
+          <button class="sqm-btn sqm-btn-secondary" id="sqm-clear">Limpar</button>
         </div>
 
         <div class="sqm-log-section">
@@ -483,7 +558,7 @@ class SoraQueueManager {
 
       if (body.style.display === 'none') {
         body.style.display = 'block';
-        toggle.textContent = '−';
+        toggle.textContent = '-';
       } else {
         body.style.display = 'none';
         toggle.textContent = '+';
@@ -503,7 +578,7 @@ class SoraQueueManager {
       const prompts = textarea.value.split('\n').filter(l => l.trim());
 
       if (prompts.length === 0) {
-        this.log('⚠ Adicione prompts!');
+        this.log('Adicione prompts primeiro!');
         return;
       }
 
@@ -549,7 +624,7 @@ class SoraQueueManager {
     if (queuedEl) queuedEl.textContent = this.queue.length;
     if (completedEl) completedEl.textContent = this.completedCount;
 
-    // Botões
+    // Botoes
     const startBtn = document.getElementById('sqm-start');
     const pauseBtn = document.getElementById('sqm-pause');
     const stopBtn = document.getElementById('sqm-stop');
@@ -559,12 +634,12 @@ class SoraQueueManager {
         startBtn.disabled = true;
         pauseBtn.disabled = false;
         stopBtn.disabled = false;
-        pauseBtn.textContent = this.isPaused ? '▶ Retomar' : '⏸ Pausar';
+        pauseBtn.textContent = this.isPaused ? 'Retomar' : 'Pausar';
       } else {
         startBtn.disabled = false;
         pauseBtn.disabled = true;
         stopBtn.disabled = true;
-        pauseBtn.textContent = '⏸ Pausar';
+        pauseBtn.textContent = 'Pausar';
       }
     }
 
@@ -612,21 +687,21 @@ class SoraQueueManager {
 }
 
 // ========================================
-// Inicialização
+// Inicializacao
 // ========================================
 
 function initSoraQM() {
   if (window.soraQueueManager) {
-    console.log('[SoraQM] Já inicializado');
+    console.log('[SoraQM] Ja inicializado');
     return;
   }
 
   if (!window.location.href.includes('sora.chatgpt.com')) {
-    console.log('[SoraQM] Não estamos no Sora');
+    console.log('[SoraQM] Nao estamos no Sora');
     return;
   }
 
-  console.log('[SoraQM] Criando instância...');
+  console.log('[SoraQM] Criando instancia...');
   window.soraQueueManager = new SoraQueueManager();
 }
 
@@ -637,7 +712,7 @@ if (document.readyState === 'loading') {
   setTimeout(initSoraQM, 1000);
 }
 
-// Detectar mudanças de URL (SPA)
+// Detectar mudancas de URL (SPA)
 let lastUrl = location.href;
 new MutationObserver(() => {
   const url = location.href;
