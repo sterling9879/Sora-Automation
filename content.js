@@ -142,6 +142,10 @@ class SoraQueueManager {
 
     await this.sleep(1500); // esperar pagina carregar
 
+    // Esperar 5s antes de enviar
+    this.log('Aguardando 5s para enviar...');
+    await this.sleep(5000);
+
     const ok = await this.submitPrompt(prompt);
     if (!ok) {
       // Devolver pra fila
@@ -149,11 +153,9 @@ class SoraQueueManager {
       this.saveToStorage();
     }
 
-    // Esperar 5s e voltar pro /drafts
-    this.log('Aguardando 5s...');
-    await this.sleep(5000);
-
+    // Voltar pro /drafts
     if (this.isRunning) {
+      await this.sleep(1000);
       location.href = 'https://sora.chatgpt.com/drafts';
     }
   }
