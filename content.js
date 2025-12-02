@@ -1,13 +1,11 @@
-// SORA QUEUE MANAGER v8 - Simples, sem navegacao
-console.log('[SoraQM v8] Carregado!');
+// SORA QUEUE MANAGER v9
+console.log('[SoraQM v9] Carregado!');
 
 class SoraQueueManager {
   constructor() {
     this.queue = [];
     this.isRunning = false;
-    this.maxConcurrent = 3;
     this.completedCount = 0;
-    this.timer = null;
 
     this.init();
   }
@@ -15,17 +13,20 @@ class SoraQueueManager {
   init() {
     this.loadFromStorage();
     this.createPanel();
-    this.log('Pronto! Fique na pagina principal.');
 
-    // Continuar se estava rodando
     if (this.isRunning && this.queue.length > 0) {
       this.log('Retomando...');
-      setTimeout(() => this.loop(), 3000);
+      setTimeout(() => this.loop(), 2000);
     }
   }
 
   async getPendingCount() {
     try {
+      // Precisa estar em /drafts pra funcionar
+      if (!location.href.includes('/drafts')) {
+        return -1; // sinaliza que precisa navegar
+      }
+
       const response = await fetch('/backend-api/v1/draft?limit=20');
       if (response.ok) {
         const data = await response.json();
@@ -36,7 +37,6 @@ class SoraQueueManager {
           return ['pending', 'running', 'preprocessing', 'queued', 'processing', 'generating'].includes(status);
         });
 
-        this.log(`Gerando: ${pending.length}/3`);
         return pending.length;
       }
     } catch (e) {
@@ -46,6 +46,11 @@ class SoraQueueManager {
   }
 
   async submitPrompt(prompt) {
+    // Precisa estar na home
+    if (location.href.includes('/drafts')) {
+      return false;
+    }
+
     this.log(`Enviando: "${prompt.substring(0, 30)}..."`);
 
     try {
@@ -90,43 +95,69 @@ class SoraQueueManager {
   }
 
   async loop() {
-    if (!this.isRunning) return;
-
-    // Ler pending
-    const pending = await this.getPendingCount();
-    const slots = this.maxConcurrent - pending;
-
-    this.updateUI();
-
-    // Se tem slot e fila
-    if (slots > 0 && this.queue.length > 0) {
-      // Esperar 5s antes de enviar
-      this.log('Aguardando 5s...');
-      await this.sleep(5000);
-
-      if (!this.isRunning) return;
-
-      const prompt = this.queue.shift();
-      this.saveToStorage();
-
-      const ok = await this.submitPrompt(prompt);
-      if (!ok) {
-        this.queue.unshift(prompt);
-        this.saveToStorage();
-      }
-
-      this.updateUI();
-    }
-
-    // Verificar fim
-    if (this.queue.length === 0) {
-      this.log('Fila vazia!');
+    if (!this.isRunning || this.queue.length === 0) {
+      if (this.queue.length === 0) this.log('Fila vazia!');
       this.stop();
       return;
     }
 
-    // Proximo ciclo em 5s
-    this.timer = setTimeout(() => this.loop(), 5000);
+    // PASSO 1: Ir pra /drafts e ler pending
+    if (!location.href.includes('/drafts')) {
+      this.log('Indo para /drafts...');
+      this.saveToStorage();
+      location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
+    const pending = await this.getPendingCount();
+    this.log(`Pending: ${pending}/3 | Fila: ${this.queue.length}`);
+    this.updateUI();
+
+    // PASSO 2: Se tem slot, esperar 5s e ir enviar
+    if (pending < 3) {
+      this.log('Slot disponivel! Aguardando 5s...');
+      await this.sleep(5000);
+
+      if (!this.isRunning) return;
+
+      // Pegar prompt e salvar
+      const prompt = this.queue.shift();
+      localStorage.setItem('sora_qm_prompt', prompt);
+      this.saveToStorage();
+
+      // Ir pra home enviar
+      this.log('Indo enviar...');
+      location.href = 'https://sora.chatgpt.com/';
+      return;
+    }
+
+    // PASSO 3: Sem slot, esperar 5s e checar de novo
+    this.log('Sem slot. Aguardando 5s...');
+    await this.sleep(5000);
+    this.loop();
+  }
+
+  // Chamado na home pra enviar o prompt pendente
+  async enviarPendente() {
+    const prompt = localStorage.getItem('sora_qm_prompt');
+    if (!prompt) return;
+
+    localStorage.removeItem('sora_qm_prompt');
+    await this.sleep(1500);
+
+    const ok = await this.submitPrompt(prompt);
+    if (!ok) {
+      this.queue.unshift(prompt);
+      this.saveToStorage();
+    }
+
+    this.updateUI();
+
+    // Voltar pro /drafts pra continuar o loop
+    if (this.isRunning) {
+      await this.sleep(1000);
+      location.href = 'https://sora.chatgpt.com/drafts';
+    }
   }
 
   start() {
@@ -154,10 +185,7 @@ class SoraQueueManager {
 
   stop() {
     this.isRunning = false;
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
+    localStorage.removeItem('sora_qm_prompt');
     this.log('Parado');
     this.saveToStorage();
     this.updateUI();
@@ -194,7 +222,7 @@ class SoraQueueManager {
     panel.id = 'sora-queue-panel';
     panel.innerHTML = `
       <div class="sqm-header">
-        <span>Sora Queue v8</span>
+        <span>Sora Queue v9</span>
         <button id="sqm-toggle">-</button>
       </div>
       <div class="sqm-body" id="sqm-body">
@@ -225,7 +253,7 @@ class SoraQueueManager {
         background: #667eea; border-radius: 7px 7px 0 0; font-weight: bold;
       }
       .sqm-header.running { background: #10b981; }
-      .sqm-header button { background: none; border: none; color: #fff; cursor: pointer; font-size: 16px; }
+      .sqm-header button { background: none; border: none; color: #fff; cursor: pointer; }
       .sqm-body { padding: 10px; }
       #sqm-prompts {
         width: 100%; height: 80px; background: #252545; border: 1px solid #4a4a6a;
@@ -237,7 +265,7 @@ class SoraQueueManager {
       #sqm-start { background: #10b981; color: #fff; }
       #sqm-stop { background: #ef4444; color: #fff; }
       #sqm-clear { background: #6b7280; color: #fff; }
-      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      button:disabled { opacity: 0.5; }
       .sqm-log { margin-top: 8px; height: 100px; overflow-y: auto; background: #0d0d1a; border-radius: 4px; padding: 6px; font-size: 11px; font-family: monospace; }
       .sqm-log div { margin: 2px 0; color: #a0a0c0; }
     `;
@@ -281,9 +309,14 @@ class SoraQueueManager {
   sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
 
-// Iniciar apenas na pagina principal
+// Iniciar
 if (!window.soraQM && location.href.includes('sora.chatgpt.com')) {
   setTimeout(() => {
     window.soraQM = new SoraQueueManager();
+
+    // Se tem prompt pra enviar (veio da navegacao)
+    if (!location.href.includes('/drafts') && localStorage.getItem('sora_qm_prompt')) {
+      window.soraQM.enviarPendente();
+    }
   }, 1000);
 }
