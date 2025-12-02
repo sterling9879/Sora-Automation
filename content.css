@@ -137,7 +137,16 @@
 .sqm-config {
   display: flex;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+}
+
+.sqm-config-single {
+  margin-bottom: 12px;
+}
+
+.sqm-config-full {
+  flex: 1;
+  width: 100%;
 }
 
 .sqm-config-row {
