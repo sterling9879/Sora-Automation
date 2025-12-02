@@ -1,17 +1,17 @@
 // ========================================
-// content.js — Sora Automation v4.2.0
-// MODO PENDING CHECK: Monitora logs do console
+// content.js — Sora Automation v4.3.0
+// MODO NETWORK SNIFFER: Descobre endpoints automaticamente
 //
 // Fluxo:
-// 1. Envia os primeiros 3 rapidamente
-// 2. Intercepta console.log para detectar "pending"
-// 3. Quando pending contém "[]", espera 5s e envia próximo
+// 1. Intercepta TODAS as requisições de rede
+// 2. Loga tudo para descobrir o endpoint correto
+// 3. Detecta arrays vazios [] nas respostas
 // ========================================
 
 class SoraAutomation {
   constructor() {
-    this.version = '4.2.0';
-    console.log(`%c[Sora v${this.version}] ===== PENDING CHECK MODE =====`, 'color: #00ff00; font-weight: bold; font-size: 14px');
+    this.version = '4.3.0';
+    console.log(`%c[Sora v${this.version}] ===== NETWORK SNIFFER MODE =====`, 'color: #00ff00; font-weight: bold; font-size: 14px');
 
     // Estado
     this.prompts = [];
@@ -33,14 +33,15 @@ class SoraAutomation {
     this.lastPendingValue = null;
     this.waitingForSlot = false;
     this.pendingCount = 0;
+    this.discoveredEndpoints = new Set();
 
     // Bind
     this.handleMessage = this.handleMessage.bind(this);
     this.processQueue = this.processQueue.bind(this);
     this.sendPrompt = this.sendPrompt.bind(this);
 
-    // Interceptar console.log para capturar mensagens de pending
-    this.setupConsoleInterceptor();
+    // Interceptar TODAS as requisições de rede
+    this.setupNetworkSniffer();
 
     // Listener de mensagens
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -51,85 +52,171 @@ class SoraAutomation {
     // Criar UI flutuante
     this.createFloatingUI();
 
-    console.log(`[Sora v${this.version}] Ready - Monitorando console para "pending"`);
+    console.log(`%c[Sora v${this.version}] 🔍 SNIFFING TODAS AS REQUISIÇÕES DE REDE...`, 'color: #ff00ff; font-weight: bold');
+    console.log(`%c[Sora v${this.version}] Aguarde alguns segundos e veja os endpoints descobertos`, 'color: #ff00ff');
   }
 
   // ============================================================
-  // INTERCEPTOR DE CONSOLE - Captura mensagens de pending
+  // NETWORK SNIFFER - Intercepta TODAS as requisições
   // ============================================================
-  setupConsoleInterceptor() {
+  setupNetworkSniffer() {
     const self = this;
-    const originalLog = console.log;
 
-    // Contador de logs interceptados
-    let logCount = 0;
+    // ===== INTERCEPTAR FETCH =====
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const url = args[0]?.url || args[0] || '';
+      const urlStr = typeof url === 'string' ? url : url.toString();
 
-    console.log = function(...args) {
-      // Chamar o original primeiro
-      originalLog.apply(console, args);
+      const response = await originalFetch.apply(this, args);
 
-      logCount++;
-
-      // Verificar se algum argumento contém "pending"
-      const message = args.map(arg => {
-        if (typeof arg === 'string') return arg;
-        if (typeof arg === 'object') {
-          try {
-            return JSON.stringify(arg);
-          } catch (e) {
-            return String(arg);
-          }
-        }
-        return String(arg);
-      }).join(' ');
-
-      // Ignorar nossas próprias mensagens
-      if (message.includes('[Sora v')) return;
-
-      // Procurar por "pending" na mensagem (case insensitive)
-      if (message.toLowerCase().includes('pending')) {
-        self.onPendingDetected(message, args);
+      // Ignorar recursos estáticos
+      if (self.isStaticResource(urlStr)) {
+        return response;
       }
+
+      try {
+        const clone = response.clone();
+        const text = await clone.text();
+
+        // Logar a requisição
+        self.logNetworkRequest('FETCH', urlStr, text, response.status);
+
+        // Verificar se é um array (potencial endpoint de pending/tasks)
+        self.checkForPendingData(urlStr, text);
+
+      } catch (e) {
+        // Ignorar erros
+      }
+
+      return response;
     };
 
-    this.log('🔌 Console interceptor ativo (monitorando "pending")', 'color: #00ffaa');
+    // ===== INTERCEPTAR XMLHttpRequest =====
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    const originalXHRSend = XMLHttpRequest.prototype.send;
 
-    // Log de status a cada 10 segundos para confirmar que está ativo
-    setInterval(() => {
-      if (self.waitingForSlot) {
-        originalLog.call(console, `%c[Sora v${self.version}] 👀 Aguardando pending... (${logCount} logs interceptados)`, 'color: #888888');
-      }
-    }, 10000);
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this._soraMethod = method;
+      this._soraUrl = url;
+      return originalXHROpen.apply(this, [method, url, ...rest]);
+    };
+
+    XMLHttpRequest.prototype.send = function(...args) {
+      const xhr = this;
+      const url = this._soraUrl || '';
+
+      this.addEventListener('load', function() {
+        if (self.isStaticResource(url)) return;
+
+        try {
+          self.logNetworkRequest('XHR', url, this.responseText, this.status);
+          self.checkForPendingData(url, this.responseText);
+        } catch (e) {
+          // Ignorar
+        }
+      });
+
+      return originalXHRSend.apply(this, args);
+    };
+
+    console.log(`%c[Sora v${this.version}] 🔌 Network sniffer ativo!`, 'color: #00ffaa; font-weight: bold');
   }
 
-  // ============================================================
-  // HANDLER DE PENDING
-  // ============================================================
-  onPendingDetected(message, args) {
-    this.pendingCount++;
+  // Verificar se é recurso estático (ignorar)
+  isStaticResource(url) {
+    const staticExtensions = ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf'];
+    const lowerUrl = url.toLowerCase();
+    return staticExtensions.some(ext => lowerUrl.includes(ext)) ||
+           lowerUrl.includes('fonts.') ||
+           lowerUrl.includes('analytics') ||
+           lowerUrl.includes('tracking');
+  }
 
-    // Verificar se contém "[]" (array vazio)
-    const hasEmptyArray = message.includes('[]') ||
-                         message.includes('[ ]') ||
-                         (args.some(arg => Array.isArray(arg) && arg.length === 0));
-
-    // Atualizar último valor
-    this.lastPendingValue = message;
-
-    if (hasEmptyArray) {
-      console.log(`%c[Sora v${this.version}] 📭 PENDING VAZIO DETECTADO! []`, 'color: #00ff00; font-weight: bold; font-size: 14px');
-      console.log(`%c[Sora v${this.version}] Mensagem original: ${message.substring(0, 100)}...`, 'color: #00aaff');
-
-      // Se estamos aguardando slot, processar
-      if (this.waitingForSlot) {
-        this.onEmptySlotDetected();
-      }
-    } else {
-      console.log(`%c[Sora v${this.version}] 📬 Pending detectado (não vazio)`, 'color: #ffaa00');
+  // Logar requisição de rede
+  logNetworkRequest(type, url, responseText, status) {
+    // Extrair path da URL
+    let path = '';
+    try {
+      const urlObj = new URL(url, window.location.origin);
+      path = urlObj.pathname;
+    } catch (e) {
+      path = url;
     }
 
-    // Atualizar UI
-    this.updateFloatingUI();
+    // Adicionar aos endpoints descobertos
+    this.discoveredEndpoints.add(path);
+
+    // Verificar se a resposta parece ser JSON
+    let isJson = false;
+    let isArray = false;
+    let arrayLength = null;
+
+    try {
+      if (responseText && responseText.trim().startsWith('[')) {
+        const parsed = JSON.parse(responseText);
+        isJson = true;
+        isArray = Array.isArray(parsed);
+        arrayLength = isArray ? parsed.length : null;
+      } else if (responseText && responseText.trim().startsWith('{')) {
+        isJson = true;
+      }
+    } catch (e) {
+      // Não é JSON
+    }
+
+    // Logar com destaque para arrays
+    if (isArray) {
+      const color = arrayLength === 0 ? '#00ff00' : '#ffaa00';
+      const emoji = arrayLength === 0 ? '📭' : '📬';
+      console.log(
+        `%c[Sora v${this.version}] ${emoji} ${type} | ${path} | Array[${arrayLength}] | Status: ${status}`,
+        `color: ${color}; font-weight: bold; font-size: 12px`
+      );
+
+      // Se for array vazio, pode ser o que procuramos!
+      if (arrayLength === 0) {
+        console.log(`%c[Sora v${this.version}] ⭐ POSSÍVEL ENDPOINT DE PENDING! → ${path}`, 'color: #00ff00; font-weight: bold; font-size: 14px; background: #003300; padding: 4px;');
+      }
+    } else if (isJson) {
+      console.log(
+        `%c[Sora v${this.version}] 📦 ${type} | ${path} | JSON Object | Status: ${status}`,
+        'color: #888888; font-size: 11px'
+      );
+    }
+  }
+
+  // Verificar se os dados são de pending/tasks
+  checkForPendingData(url, responseText) {
+    try {
+      // Verificar se é um array
+      if (!responseText || !responseText.trim().startsWith('[')) return;
+
+      const data = JSON.parse(responseText);
+      if (!Array.isArray(data)) return;
+
+      // Atualizar último valor
+      this.lastPendingValue = responseText;
+      this.pendingCount++;
+
+      const isEmpty = data.length === 0;
+
+      if (isEmpty) {
+        console.log(`%c[Sora v${this.version}] 🎯 ARRAY VAZIO DETECTADO!`, 'color: #00ff00; font-weight: bold; font-size: 16px');
+        console.log(`%c[Sora v${this.version}] URL: ${url}`, 'color: #00aaff');
+
+        // Se estamos aguardando slot, processar
+        if (this.waitingForSlot) {
+          this.onEmptySlotDetected();
+        }
+      }
+
+      // Atualizar UI
+      this.updateFloatingUI();
+
+    } catch (e) {
+      // Não é JSON válido
+    }
   }
 
   // ============================================================
@@ -866,10 +953,13 @@ class SoraAutomation {
 // BOOTSTRAP
 // ========================================
 (() => {
-  console.log('%c[Sora Automation] ===== v4.2.0 CONSOLE PENDING MODE =====', 'color: #00ff00; font-weight: bold; font-size: 14px');
-  console.log('%c[Sora] ⚡ Primeiros 3: Modo BURST (envio rápido)', 'color: #00ffaa');
-  console.log('%c[Sora] 📭 Depois: Monitora console para "pending" com "[]"', 'color: #ffaa00');
-  console.log('%c[Sora] ⏱️ Quando detectar [] → espera 5s → envia próximo', 'color: #00aaff');
+  console.log('%c╔══════════════════════════════════════════════════╗', 'color: #ff00ff; font-weight: bold');
+  console.log('%c║  SORA AUTOMATION v4.3.0 - NETWORK SNIFFER MODE   ║', 'color: #ff00ff; font-weight: bold');
+  console.log('%c╚══════════════════════════════════════════════════╝', 'color: #ff00ff; font-weight: bold');
+  console.log('%c[Sora] 🔍 Interceptando TODAS as requisições de rede', 'color: #00ffaa');
+  console.log('%c[Sora] 📬 Arrays com dados = amarelo', 'color: #ffaa00');
+  console.log('%c[Sora] 📭 Arrays vazios [] = verde (SLOT LIVRE!)', 'color: #00ff00');
+  console.log('%c[Sora] ⭐ Endpoints potenciais serão destacados', 'color: #00ff00; background: #003300; padding: 2px 4px;');
 
   const automation = new SoraAutomation();
   window._soraAutomation = automation;
