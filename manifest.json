@@ -1,14 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "Sora Queue Manager",
-  "version": "2.0.0",
-  "description": "Gerenciador de fila de prompts para Sora - máximo 3 gerações simultâneas",
+  "name": "Sora Prompt Automation",
+  "version": "3.0.0",
+  "description": "Automacao de envio de prompts para Sora - maximo 3 geracoes simultaneas",
   "permissions": [
-    "storage"
+    "storage",
+    "webRequest",
+    "cookies"
   ],
   "host_permissions": [
     "https://sora.chatgpt.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://sora.chatgpt.com/*"],
