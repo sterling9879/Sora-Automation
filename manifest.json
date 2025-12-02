@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sora Queue Manager",
-  "version": "2.0.0",
+  "version": "4.0.0",
   "description": "Gerenciador de fila de prompts para Sora - máximo 3 gerações simultâneas",
   "permissions": [
     "storage"

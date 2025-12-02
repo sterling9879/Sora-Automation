@@ -1,566 +1,323 @@
-// ========================================
-// SORA QUEUE MANAGER - Content Script
-// Gerenciador de fila com máximo 3 gerações simultâneas
-// ========================================
-
-console.log('%c[Sora Queue Manager] Script carregado!', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
+// SORA QUEUE MANAGER v7
+console.log('[SoraQM v7] Carregado!');
 
 class SoraQueueManager {
   constructor() {
     this.queue = [];
     this.isRunning = false;
-    this.isPaused = false;
     this.maxConcurrent = 3;
-    this.pollingInterval = 7000; // 7 segundos
-    this.pollingTimer = null;
-    this.tasksEndpoint = null;
-    this.activeTasks = [];
     this.completedCount = 0;
-    this.panelVisible = false;
 
     this.init();
   }
 
   init() {
     this.loadFromStorage();
-    this.interceptFetch();
     this.createPanel();
-    this.log('Extensão carregada');
-  }
+    this.log('Pronto!');
 
-  // ========================================
-  // Interceptação de Fetch para descobrir endpoints
-  // ========================================
-
-  interceptFetch() {
-    const originalFetch = window.fetch;
-    const self = this;
-
-    window.fetch = async function(...args) {
-      const response = await originalFetch.apply(this, args);
-
-      try {
-        const url = args[0]?.url || args[0];
-
-        // Detectar endpoint de tasks
-        if (typeof url === 'string' && url.includes('/tasks')) {
-          self.tasksEndpoint = url.split('?')[0];
-          self.log(`Endpoint detectado: ${self.tasksEndpoint}`);
-        }
-
-        // Detectar endpoint de drafts
-        if (typeof url === 'string' && url.includes('/draft')) {
-          // Clonar response para ler sem consumir
-          const cloned = response.clone();
-          cloned.json().then(data => {
-            if (data.items) {
-              self.log(`Drafts: ${data.items.length} itens encontrados`);
-            }
-          }).catch(() => {});
-        }
-      } catch (e) {
-        // Ignorar erros de parsing
-      }
-
-      return response;
-    };
-  }
-
-  // ========================================
-  // Polling de Tasks
-  // ========================================
-
-  async fetchActiveTasks() {
-    // Tentar buscar tasks ativas da página
-    // O Sora faz polling automático, vamos interceptar ou usar os dados do DOM
-
-    try {
-      // Método 1: Buscar do endpoint se descoberto
-      if (this.tasksEndpoint) {
-        const response = await fetch(this.tasksEndpoint);
-        const data = await response.json();
-
-        if (Array.isArray(data)) {
-          this.activeTasks = data.filter(t =>
-            t.status === 'running' || t.status === 'pending'
-          );
-          return this.activeTasks;
-        }
-      }
-
-      // Método 2: Buscar endpoint genérico de tasks
-      const endpoints = [
-        '/api/tasks',
-        '/v1/tasks',
-        '/tasks'
-      ];
-
-      for (const endpoint of endpoints) {
-        try {
-          const response = await fetch(endpoint);
-          if (response.ok) {
-            const data = await response.json();
-            if (Array.isArray(data)) {
-              this.activeTasks = data.filter(t =>
-                t.status === 'running' || t.status === 'pending'
-              );
-              this.tasksEndpoint = endpoint;
-              return this.activeTasks;
-            }
-          }
-        } catch (e) {
-          // Continuar tentando outros endpoints
-        }
-      }
-
-      // Método 3: Verificar pelo DOM (indicadores de progresso)
-      const progressIndicators = document.querySelectorAll('[class*="progress"], [class*="generating"], [class*="loading"]');
-      const runningCount = progressIndicators.length;
-
-      // Criar tasks fictícias baseadas no DOM
-      this.activeTasks = [];
-      for (let i = 0; i < runningCount && i < 3; i++) {
-        this.activeTasks.push({
-          id: `dom_task_${i}`,
-          status: 'running'
-        });
-      }
-
-      return this.activeTasks;
-
-    } catch (error) {
-      this.log(`Erro ao buscar tasks: ${error.message}`);
-      return [];
+    if (this.isRunning) {
+      setTimeout(() => this.processLoop(), 2000);
     }
   }
 
-  getActiveCount() {
-    return this.activeTasks.filter(t =>
-      t.status === 'running' || t.status === 'pending'
-    ).length;
+  // Busca drafts e conta quantos estão pendentes
+  async getPendingCount() {
+    try {
+      const response = await fetch('/backend-api/v1/draft?limit=20');
+      if (response.ok) {
+        const data = await response.json();
+        const drafts = Array.isArray(data) ? data : (data.items || data.drafts || []);
+
+        // Contar pendentes (status pending, running, preprocessing, queued, etc)
+        const pending = drafts.filter(d => {
+          const status = (d.status || '').toLowerCase();
+          return status === 'pending' || status === 'running' ||
+                 status === 'preprocessing' || status === 'queued' ||
+                 status === 'processing' || status === 'generating';
+        });
+
+        console.log('[SoraQM] Drafts:', drafts.length, 'Pending:', pending.length);
+        return pending.length;
+      }
+    } catch (e) {
+      this.log('Erro fetch: ' + e.message);
+    }
+    return 0;
   }
 
-  // ========================================
-  // Envio de Prompts
-  // ========================================
-
   async submitPrompt(prompt) {
-    this.log(`Enviando: "${prompt.substring(0, 50)}..."`);
+    this.log(`Enviando: "${prompt.substring(0, 30)}..."`);
 
     try {
-      // Encontrar textarea
-      const textarea = await this.waitForElement('textarea[placeholder="Describe your video..."]', 5000);
+      const textarea = document.querySelector('textarea');
+      if (!textarea) throw new Error('Textarea nao encontrada');
 
-      if (!textarea) {
-        throw new Error('Textarea não encontrada');
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      setter?.call(textarea, prompt);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+      await this.sleep(800);
+
+      const btn = this.findCreateButton();
+      if (!btn) throw new Error('Botao nao encontrado');
+
+      let tries = 0;
+      while (btn.disabled && tries < 10) {
+        await this.sleep(300);
+        tries++;
       }
 
-      // Preencher textarea (compatível com React)
-      this.fillReactTextarea(textarea, prompt);
-      await this.sleep(500);
+      if (btn.disabled) throw new Error('Botao desabilitado');
 
-      // Encontrar e clicar no botão
-      const createButton = this.findCreateButton();
+      btn.click();
+      this.log('Enviado!');
+      this.completedCount++;
+      this.saveToStorage();
 
-      if (!createButton) {
-        throw new Error('Botão Create não encontrado');
-      }
-
-      if (createButton.disabled) {
-        this.log('Aguardando botão habilitar...');
-        await this.sleep(2000);
-      }
-
-      createButton.click();
-      this.log('Prompt enviado com sucesso!');
-
-      await this.sleep(1000);
       return true;
 
-    } catch (error) {
-      this.log(`Erro ao enviar: ${error.message}`);
+    } catch (e) {
+      this.log(`Erro: ${e.message}`);
       return false;
     }
   }
 
-  fillReactTextarea(textarea, text) {
-    textarea.focus();
-    textarea.value = '';
-
-    // Usar setter nativo para React detectar
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, 'value'
-    ).set;
-
-    nativeSetter.call(textarea, text);
-
-    // Disparar eventos necessários
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    textarea.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
   findCreateButton() {
-    // Procurar pelo sr-only text
-    const buttons = document.querySelectorAll('button');
-
-    for (const btn of buttons) {
-      const srOnly = btn.querySelector('.sr-only');
-      if (srOnly && srOnly.textContent.includes('Create')) {
-        return btn;
-      }
+    for (const btn of document.querySelectorAll('button')) {
+      const sr = btn.querySelector('.sr-only');
+      if (sr && sr.textContent.includes('Create')) return btn;
     }
-
-    // Fallback: procurar por atributos comuns
-    for (const btn of buttons) {
-      if (btn.querySelector('svg') && !btn.disabled) {
-        const rect = btn.getBoundingClientRect();
-        // Geralmente é um botão pequeno no canto
-        if (rect.width < 60 && rect.height < 60) {
-          return btn;
-        }
-      }
-    }
-
     return null;
   }
 
-  // ========================================
-  // Loop Principal
-  // ========================================
+  async processLoop() {
+    if (!this.isRunning) return;
 
-  async startProcessing() {
-    if (this.isRunning) return;
+    // Ir para /drafts para ler pending
+    if (!location.href.includes('/drafts')) {
+      this.log('Indo para /drafts...');
+      this.saveToStorage();
+      location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
 
-    this.isRunning = true;
-    this.isPaused = false;
-    this.log('Processamento iniciado');
+    // Contar pendentes
+    const pending = await this.getPendingCount();
+    const slots = this.maxConcurrent - pending;
+
+    this.log(`Pending: ${pending}/3 | Slots: ${slots} | Fila: ${this.queue.length}`);
     this.updateUI();
 
-    this.pollingTimer = setInterval(() => this.processLoop(), this.pollingInterval);
+    // Se tem slot e fila, ir para home e enviar
+    if (slots > 0 && this.queue.length > 0) {
+      const prompt = this.queue.shift();
+      this.saveToStorage();
 
-    // Executar imediatamente também
-    await this.processLoop();
-  }
+      // Ir para home para enviar
+      this.log('Indo enviar...');
+      localStorage.setItem('sora_qm_send', prompt);
+      location.href = 'https://sora.chatgpt.com/';
+      return;
+    }
 
-  async processLoop() {
-    if (!this.isRunning || this.isPaused) return;
-    if (this.queue.length === 0) {
-      this.log('Fila vazia - processamento concluído');
+    // Verificar fim
+    if (this.queue.length === 0 && pending === 0) {
+      this.log('Tudo concluido!');
       this.stop();
       return;
     }
 
-    // Buscar tasks ativas
-    await this.fetchActiveTasks();
-    const activeCount = this.getActiveCount();
+    // Continuar checando a cada 5s
+    this.log('Aguardando 5s...');
+    setTimeout(() => this.processLoop(), 5000);
+  }
 
-    this.log(`Tasks ativas: ${activeCount}/3`);
-    this.updateUI();
+  // Chamado quando está na home e tem prompt pra enviar
+  async sendPendingPrompt() {
+    const prompt = localStorage.getItem('sora_qm_send');
+    if (!prompt) return;
 
-    // Enviar prompts se houver slots disponíveis
-    while (activeCount + this.activeTasks.length < this.maxConcurrent && this.queue.length > 0) {
-      if (!this.isRunning || this.isPaused) break;
+    localStorage.removeItem('sora_qm_send');
 
-      const prompt = this.queue.shift();
-      const success = await this.submitPrompt(prompt);
+    await this.sleep(1500); // esperar pagina carregar
 
-      if (success) {
-        this.completedCount++;
-        // Adicionar task fictícia para não enviar demais
-        this.activeTasks.push({
-          id: `submitted_${Date.now()}`,
-          status: 'pending'
-        });
-      } else {
-        // Devolver à fila em caso de erro
-        this.queue.unshift(prompt);
-        break;
-      }
+    // Esperar 5s antes de enviar
+    this.log('Aguardando 5s para enviar...');
+    await this.sleep(5000);
 
+    const ok = await this.submitPrompt(prompt);
+    if (!ok) {
+      // Devolver pra fila
+      this.queue.unshift(prompt);
       this.saveToStorage();
-      this.updateUI();
+    }
 
-      // Pequena pausa entre submissões
-      await this.sleep(2000);
+    // Voltar pro /drafts
+    if (this.isRunning) {
+      await this.sleep(1000);
+      location.href = 'https://sora.chatgpt.com/drafts';
     }
   }
 
-  pause() {
-    this.isPaused = true;
-    this.log('Pausado');
-    this.updateUI();
-  }
+  start() {
+    if (this.isRunning) return;
 
-  resume() {
-    this.isPaused = false;
-    this.log('Retomado');
+    const textarea = document.getElementById('sqm-prompts');
+    const prompts = textarea.value.split('\n').filter(l => l.trim());
+
+    if (prompts.length === 0) {
+      this.log('Adicione prompts!');
+      return;
+    }
+
+    this.queue = prompts;
+    this.completedCount = 0;
+    textarea.value = '';
+
+    this.isRunning = true;
+    this.saveToStorage();
+    this.log('Iniciando...');
     this.updateUI();
+
     this.processLoop();
   }
 
   stop() {
     this.isRunning = false;
-    this.isPaused = false;
-
-    if (this.pollingTimer) {
-      clearInterval(this.pollingTimer);
-      this.pollingTimer = null;
-    }
-
+    localStorage.removeItem('sora_qm_send');
     this.log('Parado');
+    this.saveToStorage();
     this.updateUI();
   }
 
-  clearQueue() {
+  clear() {
     this.queue = [];
     this.completedCount = 0;
+    this.isRunning = false;
+    localStorage.removeItem('sora_qm_send');
     this.saveToStorage();
-    this.log('Fila limpa');
+    this.log('Limpo');
     this.updateUI();
   }
 
-  // ========================================
-  // Persistência (localStorage)
-  // ========================================
-
   saveToStorage() {
-    const data = {
+    localStorage.setItem('sora_qm', JSON.stringify({
       queue: this.queue,
-      completedCount: this.completedCount
-    };
-    localStorage.setItem('sora_queue_manager', JSON.stringify(data));
+      completedCount: this.completedCount,
+      isRunning: this.isRunning
+    }));
   }
 
   loadFromStorage() {
     try {
-      const data = localStorage.getItem('sora_queue_manager');
-      if (data) {
-        const parsed = JSON.parse(data);
-        this.queue = parsed.queue || [];
-        this.completedCount = parsed.completedCount || 0;
-
-        if (this.queue.length > 0) {
-          this.log(`Fila restaurada: ${this.queue.length} prompts`);
-        }
-      }
-    } catch (e) {
-      this.queue = [];
-      this.completedCount = 0;
-    }
+      const data = JSON.parse(localStorage.getItem('sora_qm') || '{}');
+      this.queue = data.queue || [];
+      this.completedCount = data.completedCount || 0;
+      this.isRunning = data.isRunning || false;
+    } catch (e) {}
   }
 
-  // ========================================
-  // UI - Painel Flutuante
-  // ========================================
-
   createPanel() {
-    console.log('[SoraQM] Criando painel...');
-
-    // Criar container do painel
     const panel = document.createElement('div');
     panel.id = 'sora-queue-panel';
     panel.innerHTML = `
       <div class="sqm-header">
-        <span class="sqm-title">🎬 Sora Queue Manager</span>
-        <button class="sqm-toggle" id="sqm-toggle">−</button>
+        <span>Sora Queue v7</span>
+        <button id="sqm-toggle">-</button>
       </div>
-
       <div class="sqm-body" id="sqm-body">
-        <div class="sqm-section">
-          <label>Prompts (um por linha):</label>
-          <textarea id="sqm-prompts" placeholder="Digite seus prompts aqui...&#10;Um prompt por linha&#10;Pressione Enter para nova linha"></textarea>
-          <div class="sqm-prompt-count">
-            <span id="sqm-count">0</span> prompts na fila
-          </div>
-        </div>
-
+        <textarea id="sqm-prompts" placeholder="Um prompt por linha..."></textarea>
         <div class="sqm-status">
-          <div class="sqm-status-item">
-            <span class="sqm-label">Tasks ativas:</span>
-            <span class="sqm-value" id="sqm-active">0/3</span>
-          </div>
-          <div class="sqm-status-item">
-            <span class="sqm-label">Na fila:</span>
-            <span class="sqm-value" id="sqm-queued">0</span>
-          </div>
-          <div class="sqm-status-item">
-            <span class="sqm-label">Concluídos:</span>
-            <span class="sqm-value" id="sqm-completed">0</span>
-          </div>
+          <span>Fila: <b id="sqm-queue">0</b></span>
+          <span>Enviados: <b id="sqm-done">0</b></span>
         </div>
-
         <div class="sqm-buttons">
-          <button class="sqm-btn sqm-btn-primary" id="sqm-start">▶ Iniciar</button>
-          <button class="sqm-btn sqm-btn-secondary" id="sqm-pause" disabled>⏸ Pausar</button>
-          <button class="sqm-btn sqm-btn-danger" id="sqm-stop" disabled>⏹ Parar</button>
-          <button class="sqm-btn sqm-btn-secondary" id="sqm-clear">🗑 Limpar</button>
+          <button id="sqm-start">Iniciar</button>
+          <button id="sqm-stop" disabled>Parar</button>
+          <button id="sqm-clear">Limpar</button>
         </div>
-
-        <div class="sqm-log-section">
-          <label>Log:</label>
-          <div class="sqm-log" id="sqm-log"></div>
-        </div>
+        <div class="sqm-log" id="sqm-log"></div>
       </div>
     `;
-
     document.body.appendChild(panel);
-    this.panel = panel;
 
-    // Event listeners
-    this.setupEventListeners();
+    const style = document.createElement('style');
+    style.textContent = `
+      #sora-queue-panel {
+        position: fixed; top: 10px; right: 10px; width: 300px;
+        background: #1a1a2e; border: 1px solid #4a4a6a; border-radius: 8px;
+        font-family: system-ui; font-size: 13px; color: #fff; z-index: 99999;
+      }
+      .sqm-header {
+        display: flex; justify-content: space-between; padding: 8px 12px;
+        background: #667eea; border-radius: 7px 7px 0 0; font-weight: bold;
+      }
+      .sqm-header.running { background: #10b981; }
+      .sqm-header button { background: none; border: none; color: #fff; cursor: pointer; font-size: 16px; }
+      .sqm-body { padding: 10px; }
+      #sqm-prompts {
+        width: 100%; height: 80px; background: #252545; border: 1px solid #4a4a6a;
+        border-radius: 4px; color: #fff; padding: 8px; resize: vertical; box-sizing: border-box;
+      }
+      .sqm-status { display: flex; justify-content: space-around; margin: 8px 0; font-size: 12px; }
+      .sqm-buttons { display: flex; gap: 5px; }
+      .sqm-buttons button { flex: 1; padding: 6px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+      #sqm-start { background: #10b981; color: #fff; }
+      #sqm-stop { background: #ef4444; color: #fff; }
+      #sqm-clear { background: #6b7280; color: #fff; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .sqm-log { margin-top: 8px; height: 100px; overflow-y: auto; background: #0d0d1a; border-radius: 4px; padding: 6px; font-size: 11px; font-family: monospace; }
+      .sqm-log div { margin: 2px 0; color: #a0a0c0; }
+    `;
+    document.head.appendChild(style);
+
+    document.getElementById('sqm-toggle').onclick = () => {
+      const body = document.getElementById('sqm-body');
+      body.style.display = body.style.display === 'none' ? 'block' : 'none';
+    };
+    document.getElementById('sqm-start').onclick = () => this.start();
+    document.getElementById('sqm-stop').onclick = () => this.stop();
+    document.getElementById('sqm-clear').onclick = () => this.clear();
+
     this.updateUI();
   }
 
-  setupEventListeners() {
-    // Toggle minimizar
-    document.getElementById('sqm-toggle').addEventListener('click', () => {
-      const body = document.getElementById('sqm-body');
-      const toggle = document.getElementById('sqm-toggle');
-
-      if (body.style.display === 'none') {
-        body.style.display = 'block';
-        toggle.textContent = '−';
-      } else {
-        body.style.display = 'none';
-        toggle.textContent = '+';
-      }
-    });
-
-    // Textarea - contar prompts
-    const textarea = document.getElementById('sqm-prompts');
-    textarea.addEventListener('input', () => {
-      const lines = textarea.value.split('\n').filter(l => l.trim());
-      document.getElementById('sqm-count').textContent = lines.length;
-    });
-
-    // Botão Iniciar
-    document.getElementById('sqm-start').addEventListener('click', () => {
-      const textarea = document.getElementById('sqm-prompts');
-      const prompts = textarea.value.split('\n').filter(l => l.trim());
-
-      if (prompts.length === 0) {
-        this.log('Adicione prompts antes de iniciar');
-        return;
-      }
-
-      this.queue = prompts;
-      this.completedCount = 0;
-      this.saveToStorage();
-      textarea.value = '';
-      document.getElementById('sqm-count').textContent = '0';
-
-      this.startProcessing();
-    });
-
-    // Botão Pausar/Retomar
-    document.getElementById('sqm-pause').addEventListener('click', () => {
-      if (this.isPaused) {
-        this.resume();
-      } else {
-        this.pause();
-      }
-    });
-
-    // Botão Parar
-    document.getElementById('sqm-stop').addEventListener('click', () => {
-      this.stop();
-    });
-
-    // Botão Limpar
-    document.getElementById('sqm-clear').addEventListener('click', () => {
-      this.clearQueue();
-      document.getElementById('sqm-prompts').value = '';
-      document.getElementById('sqm-count').textContent = '0';
-    });
-  }
-
   updateUI() {
-    const activeCount = this.getActiveCount();
+    const q = document.getElementById('sqm-queue');
+    const d = document.getElementById('sqm-done');
+    const start = document.getElementById('sqm-start');
+    const stop = document.getElementById('sqm-stop');
+    const header = document.querySelector('.sqm-header');
 
-    // Atualizar status
-    document.getElementById('sqm-active').textContent = `${activeCount}/3`;
-    document.getElementById('sqm-queued').textContent = this.queue.length;
-    document.getElementById('sqm-completed').textContent = this.completedCount;
+    if (q) q.textContent = this.queue.length;
+    if (d) d.textContent = this.completedCount;
+    if (start) start.disabled = this.isRunning;
+    if (stop) stop.disabled = !this.isRunning;
+    if (header) header.classList.toggle('running', this.isRunning);
+  }
 
-    // Atualizar botões
-    const startBtn = document.getElementById('sqm-start');
-    const pauseBtn = document.getElementById('sqm-pause');
-    const stopBtn = document.getElementById('sqm-stop');
-
-    if (this.isRunning) {
-      startBtn.disabled = true;
-      pauseBtn.disabled = false;
-      stopBtn.disabled = false;
-      pauseBtn.textContent = this.isPaused ? '▶ Retomar' : '⏸ Pausar';
-    } else {
-      startBtn.disabled = false;
-      pauseBtn.disabled = true;
-      stopBtn.disabled = true;
-      pauseBtn.textContent = '⏸ Pausar';
-    }
-
-    // Indicador visual de status
-    const header = this.panel.querySelector('.sqm-header');
-    header.classList.remove('running', 'paused');
-
-    if (this.isRunning && !this.isPaused) {
-      header.classList.add('running');
-    } else if (this.isPaused) {
-      header.classList.add('paused');
+  log(msg) {
+    console.log('[SoraQM]', msg);
+    const log = document.getElementById('sqm-log');
+    if (log) {
+      const time = new Date().toLocaleTimeString('pt-BR');
+      log.innerHTML += `<div>[${time}] ${msg}</div>`;
+      log.scrollTop = log.scrollHeight;
     }
   }
 
-  // ========================================
-  // Utilidades
-  // ========================================
-
-  log(message) {
-    const timestamp = new Date().toLocaleTimeString('pt-BR');
-    const logEntry = `[${timestamp}] ${message}`;
-
-    console.log(`[SoraQM] ${message}`);
-
-    const logDiv = document.getElementById('sqm-log');
-    if (logDiv) {
-      const entry = document.createElement('div');
-      entry.className = 'sqm-log-entry';
-      entry.textContent = logEntry;
-      logDiv.appendChild(entry);
-      logDiv.scrollTop = logDiv.scrollHeight;
-
-      // Limitar a 100 entradas
-      while (logDiv.children.length > 100) {
-        logDiv.removeChild(logDiv.firstChild);
-      }
-    }
-  }
-
-  async waitForElement(selector, timeout = 10000) {
-    const start = Date.now();
-
-    while (Date.now() - start < timeout) {
-      const element = document.querySelector(selector);
-      if (element) return element;
-      await this.sleep(200);
-    }
-
-    return null;
-  }
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
 
-// ========================================
-// Inicialização
-// ========================================
+// Iniciar
+if (!window.soraQM && location.href.includes('sora.chatgpt.com')) {
+  setTimeout(() => {
+    window.soraQM = new SoraQueueManager();
 
-// Aguardar DOM estar pronto
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    window.soraQueueManager = new SoraQueueManager();
-  });
-} else {
-  window.soraQueueManager = new SoraQueueManager();
+    // Se está na home e tem prompt pra enviar
+    if (!location.href.includes('/drafts') && localStorage.getItem('sora_qm_send')) {
+      window.soraQM.sendPendingPrompt();
+    }
+  }, 1000);
 }
