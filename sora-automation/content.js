@@ -61,9 +61,14 @@ class SoraAutomation {
     const self = this;
     const originalLog = console.log;
 
+    // Contador de logs interceptados
+    let logCount = 0;
+
     console.log = function(...args) {
       // Chamar o original primeiro
       originalLog.apply(console, args);
+
+      logCount++;
 
       // Verificar se algum argumento contém "pending"
       const message = args.map(arg => {
@@ -78,6 +83,9 @@ class SoraAutomation {
         return String(arg);
       }).join(' ');
 
+      // Ignorar nossas próprias mensagens
+      if (message.includes('[Sora v')) return;
+
       // Procurar por "pending" na mensagem (case insensitive)
       if (message.toLowerCase().includes('pending')) {
         self.onPendingDetected(message, args);
@@ -85,15 +93,19 @@ class SoraAutomation {
     };
 
     this.log('🔌 Console interceptor ativo (monitorando "pending")', 'color: #00ffaa');
+
+    // Log de status a cada 10 segundos para confirmar que está ativo
+    setInterval(() => {
+      if (self.waitingForSlot) {
+        originalLog.call(console, `%c[Sora v${self.version}] 👀 Aguardando pending... (${logCount} logs interceptados)`, 'color: #888888');
+      }
+    }, 10000);
   }
 
   // ============================================================
   // HANDLER DE PENDING
   // ============================================================
   onPendingDetected(message, args) {
-    // Ignorar nossas próprias mensagens
-    if (message.includes('[Sora v')) return;
-
     this.pendingCount++;
 
     // Verificar se contém "[]" (array vazio)
