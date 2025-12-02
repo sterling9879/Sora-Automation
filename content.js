@@ -1,9 +1,10 @@
 // ========================================
 // SORA PROMPT AUTOMATION - Content Script
 // Automacao de envio de prompts com maximo 3 geracoes simultaneas
+// v3.1.0 - Suporte a envio via DOM e API
 // ========================================
 
-console.log('%c[Sora Automation] Script carregado v3.0.0', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
+console.log('%c[Sora Automation] Script carregado v3.1.0', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
 
 class SoraPromptAutomation {
   constructor() {
@@ -11,7 +12,8 @@ class SoraPromptAutomation {
     this.config = {
       orientation: 'portrait',  // portrait, landscape, square
       duration: 300,            // 150 = 5s, 300 = 10s, 450 = 20s
-      model: 'sy_8'
+      model: 'sy_8',
+      submitMode: 'dom'         // 'dom' ou 'api'
     };
 
     // Estado
@@ -36,6 +38,13 @@ class SoraPromptAutomation {
       drafts: 'https://sora.chatgpt.com/backend/project_y/profile/drafts'
     };
 
+    // Seletores DOM do Sora
+    this.SELECTORS = {
+      textarea: 'textarea[placeholder="Describe your video..."]',
+      createButton: 'button .sr-only',
+      createButtonAlt: 'button[data-state]'
+    };
+
     this.init();
   }
 
@@ -45,8 +54,8 @@ class SoraPromptAutomation {
     this.setupMessageListener();
     this.createPanel();
     await this.requestHeaders();
-    this.log('Extensao iniciada - aguardando captura de headers');
-    this.log('Navegue pelo site para capturar tokens de autenticacao');
+    this.log('Extensao iniciada v3.1.0');
+    this.log(`Modo de envio: ${this.config.submitMode.toUpperCase()}`);
   }
 
   // ========================================
@@ -137,7 +146,6 @@ class SoraPromptAutomation {
     if (!statusEl) return;
 
     const hasAuth = this.authHeaders?.authorization;
-    const hasSentinel = this.authHeaders?.['openai-sentinel-token'];
 
     if (hasAuth) {
       statusEl.textContent = 'Autenticado';
@@ -149,7 +157,146 @@ class SoraPromptAutomation {
   }
 
   // ========================================
-  // API - Requisicoes
+  // Envio via DOM (textarea + botao)
+  // ========================================
+
+  findTextarea() {
+    // Busca pelo placeholder especifico
+    let textarea = document.querySelector(this.SELECTORS.textarea);
+    if (textarea) return textarea;
+
+    // Fallback: busca qualquer textarea visivel
+    const textareas = document.querySelectorAll('textarea');
+    for (const ta of textareas) {
+      if (ta.offsetParent !== null && ta.placeholder.includes('video')) {
+        return ta;
+      }
+    }
+
+    return null;
+  }
+
+  findCreateButton() {
+    // Metodo 1: Busca pelo sr-only com texto "Create"
+    const srOnlyElements = document.querySelectorAll('button .sr-only');
+    for (const el of srOnlyElements) {
+      if (el.textContent.includes('Create')) {
+        return el.closest('button');
+      }
+    }
+
+    // Metodo 2: Busca botao redondo proximo ao textarea
+    const textarea = this.findTextarea();
+    if (textarea) {
+      const container = textarea.closest('div[class*="flex"]')?.parentElement;
+      if (container) {
+        const buttons = container.querySelectorAll('button');
+        for (const btn of buttons) {
+          // Botao de criar geralmente tem SVG de seta
+          if (btn.querySelector('svg path[d*="5.293"]')) {
+            return btn;
+          }
+        }
+      }
+    }
+
+    // Metodo 3: Busca qualquer botao com SVG de seta para cima
+    const allButtons = document.querySelectorAll('button[data-state]');
+    for (const btn of allButtons) {
+      const path = btn.querySelector('svg path');
+      if (path && path.getAttribute('d')?.includes('5.293')) {
+        return btn;
+      }
+    }
+
+    return null;
+  }
+
+  fillTextareaReact(textarea, text) {
+    // Foca no elemento
+    textarea.focus();
+
+    // Limpa o conteudo atual
+    textarea.value = '';
+
+    // Usa o setter nativo para compatibilidade com React
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value'
+    )?.set;
+
+    if (nativeSetter) {
+      nativeSetter.call(textarea, text);
+    } else {
+      textarea.value = text;
+    }
+
+    // Dispara eventos para React detectar a mudanca
+    textarea.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+
+    // Dispara evento de teclado para simular digitacao
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+    textarea.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+  }
+
+  async submitViaDOM(prompt) {
+    this.log('Enviando via DOM...');
+
+    try {
+      // 1. Encontra o textarea
+      const textarea = this.findTextarea();
+      if (!textarea) {
+        throw new Error('Textarea nao encontrada na pagina');
+      }
+
+      // 2. Preenche o textarea
+      this.fillTextareaReact(textarea, prompt);
+      this.log('Prompt inserido no textarea');
+
+      // 3. Aguarda um pouco para React processar
+      await this.sleep(800);
+
+      // 4. Encontra o botao de criar
+      const createButton = this.findCreateButton();
+      if (!createButton) {
+        throw new Error('Botao Create nao encontrado');
+      }
+
+      // 5. Verifica se o botao esta habilitado
+      const isDisabled = createButton.disabled ||
+                         createButton.getAttribute('data-disabled') === 'true' ||
+                         createButton.getAttribute('aria-disabled') === 'true';
+
+      if (isDisabled) {
+        this.log('Botao desabilitado, aguardando...');
+        await this.sleep(1500);
+
+        // Verifica novamente
+        const stillDisabled = createButton.disabled ||
+                              createButton.getAttribute('data-disabled') === 'true';
+        if (stillDisabled) {
+          throw new Error('Botao permanece desabilitado - verifique o prompt');
+        }
+      }
+
+      // 6. Clica no botao
+      createButton.click();
+      this.log('Botao Create clicado');
+
+      // 7. Aguarda processamento
+      await this.sleep(1000);
+
+      return { success: true };
+
+    } catch (error) {
+      this.log(`Erro DOM: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ========================================
+  // API - Requisicoes diretas
   // ========================================
 
   getRequestHeaders() {
@@ -207,12 +354,17 @@ class SoraPromptAutomation {
       return [];
 
     } catch (error) {
-      this.log(`Erro ao buscar tasks: ${error.message}`);
+      // Nao loga erro se for problema de rede comum
+      if (!error.message.includes('Failed to fetch')) {
+        this.log(`Erro ao buscar tasks: ${error.message}`);
+      }
       return this.activeTasks; // Retorna ultimo estado conhecido
     }
   }
 
-  async createGeneration(prompt) {
+  async submitViaAPI(prompt) {
+    this.log('Enviando via API...');
+
     const payload = {
       kind: 'video',
       prompt: prompt,
@@ -272,16 +424,49 @@ class SoraPromptAutomation {
   }
 
   // ========================================
+  // Metodo principal de envio (com fallback)
+  // ========================================
+
+  async submitPrompt(prompt) {
+    let result;
+
+    if (this.config.submitMode === 'dom') {
+      // Tenta via DOM primeiro
+      result = await this.submitViaDOM(prompt);
+
+      // Se falhar, tenta via API
+      if (!result.success && this.authHeaders?.authorization) {
+        this.log('DOM falhou, tentando via API...');
+        result = await this.submitViaAPI(prompt);
+      }
+    } else {
+      // Tenta via API primeiro
+      result = await this.submitViaAPI(prompt);
+
+      // Se falhar, tenta via DOM
+      if (!result.success) {
+        this.log('API falhou, tentando via DOM...');
+        result = await this.submitViaDOM(prompt);
+      }
+    }
+
+    return result;
+  }
+
+  // ========================================
   // Loop Principal de Processamento
   // ========================================
 
   async startProcessing() {
     if (this.isRunning) return;
 
-    if (!this.authHeaders?.authorization) {
-      this.log('Erro: Headers de autenticacao nao capturados');
-      this.log('Navegue pelo site ou recarregue a pagina');
-      return;
+    // Se modo API, verifica headers
+    if (this.config.submitMode === 'api' && !this.authHeaders?.authorization) {
+      this.log('Modo API: Headers nao capturados');
+      this.log('Mudando para modo DOM ou navegue pelo site');
+      // Muda para DOM automaticamente
+      this.config.submitMode = 'dom';
+      document.getElementById('sqm-submit-mode').value = 'dom';
     }
 
     if (this.queue.length === 0) {
@@ -289,9 +474,20 @@ class SoraPromptAutomation {
       return;
     }
 
+    // Verifica se textarea existe (para modo DOM)
+    if (this.config.submitMode === 'dom') {
+      const textarea = this.findTextarea();
+      if (!textarea) {
+        this.log('ERRO: Textarea nao encontrada!');
+        this.log('Navegue para /profile ou /explore primeiro');
+        return;
+      }
+    }
+
     this.isRunning = true;
     this.isPaused = false;
     this.log(`Iniciando processamento de ${this.queue.length} prompts`);
+    this.log(`Modo: ${this.config.submitMode.toUpperCase()}`);
     this.updateUI();
 
     // Executa loop imediatamente
@@ -315,7 +511,7 @@ class SoraPromptAutomation {
     await this.fetchPendingTasks();
     const activeCount = this.activeTasks.length;
 
-    this.log(`Polling: ${activeCount}/3 tasks ativas, ${this.queue.length} na fila`);
+    this.log(`Polling: ${activeCount}/3 ativas, ${this.queue.length} na fila`);
     this.updateUI();
 
     // Envia prompts se houver slots disponiveis
@@ -325,12 +521,12 @@ class SoraPromptAutomation {
 
       this.log(`Enviando: "${shortPrompt}"`);
 
-      const result = await this.createGeneration(prompt);
+      const result = await this.submitPrompt(prompt);
 
       if (result.success) {
         this.queue.shift(); // Remove da fila apenas se sucesso
         this.completedCount++;
-        this.log(`Sucesso! Geracao criada`);
+        this.log('Sucesso! Geracao iniciada');
 
         // Adiciona task ficticia para controle
         this.activeTasks.push({
@@ -341,10 +537,15 @@ class SoraPromptAutomation {
         this.errorCount++;
         this.log(`Erro: ${result.error}`);
 
-        // Se for erro de moderacao, remove o prompt problematico
+        // Se for erro de moderacao, remove o prompt
         if (result.error.includes('Moderacao') || result.error.includes('Validacao')) {
           this.queue.shift();
-          this.log('Prompt removido da fila devido a erro de moderacao');
+          this.log('Prompt removido (erro de moderacao)');
+        } else if (result.error.includes('Textarea') || result.error.includes('Botao')) {
+          // Erro de DOM - pausa para usuario verificar
+          this.log('Verifique se esta na pagina correta');
+          this.pause();
+          break;
         } else {
           // Outros erros: pausa e deixa usuario decidir
           this.pause();
@@ -357,7 +558,7 @@ class SoraPromptAutomation {
 
       // Delay entre submissoes para evitar rate limiting
       if (this.queue.length > 0 && this.activeTasks.length < this.maxConcurrent) {
-        this.log(`Aguardando ${this.submitDelay / 1000}s antes do proximo envio...`);
+        this.log(`Aguardando ${this.submitDelay / 1000}s...`);
         await this.sleep(this.submitDelay);
       }
     }
@@ -474,6 +675,17 @@ class SoraPromptAutomation {
       </div>
 
       <div class="sqm-body" id="sqm-body">
+        <!-- Modo de Envio -->
+        <div class="sqm-config sqm-config-single">
+          <div class="sqm-config-row sqm-config-full">
+            <label>Modo de Envio:</label>
+            <select id="sqm-submit-mode">
+              <option value="dom">DOM (Textarea + Botao)</option>
+              <option value="api">API Direta</option>
+            </select>
+          </div>
+        </div>
+
         <!-- Configuracoes -->
         <div class="sqm-config">
           <div class="sqm-config-row">
@@ -573,6 +785,19 @@ class SoraPromptAutomation {
       }
     });
 
+    // Modo de envio
+    document.getElementById('sqm-submit-mode').addEventListener('change', (e) => {
+      this.config.submitMode = e.target.value;
+      this.saveToStorage();
+      this.log(`Modo de envio: ${e.target.value.toUpperCase()}`);
+
+      // Mostra aviso se API selecionada sem headers
+      if (e.target.value === 'api' && !this.authHeaders?.authorization) {
+        this.log('AVISO: Headers nao capturados para modo API');
+        this.log('Navegue pelo site para capturar tokens');
+      }
+    });
+
     // Seletores de configuracao
     document.getElementById('sqm-orientation').addEventListener('change', (e) => {
       this.config.orientation = e.target.value;
@@ -588,6 +813,7 @@ class SoraPromptAutomation {
     });
 
     // Restaura config nos selects
+    document.getElementById('sqm-submit-mode').value = this.config.submitMode;
     document.getElementById('sqm-orientation').value = this.config.orientation;
     document.getElementById('sqm-duration').value = this.config.duration.toString();
 
