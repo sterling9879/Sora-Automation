@@ -1,12 +1,12 @@
-// SORA QUEUE MANAGER v5 - Simples
-console.log('[SoraQM v5] Carregado!');
+// SORA QUEUE MANAGER v6
+console.log('[SoraQM v6] Carregado!');
 
 class SoraQueueManager {
   constructor() {
     this.queue = [];
     this.isRunning = false;
     this.maxConcurrent = 3;
-    this.activePrompts = []; // prompts enviados aguardando conclusao
+    this.activePrompts = [];
     this.completedCount = 0;
     this.pollingTimer = null;
 
@@ -16,41 +16,52 @@ class SoraQueueManager {
   init() {
     this.loadFromStorage();
     this.createPanel();
-    this.log('Pronto!');
+
+    const onDrafts = location.href.includes('/drafts');
+    this.log(onDrafts ? 'Pagina /drafts OK!' : 'Va para /drafts primeiro!');
+
+    // Se estava rodando, continuar
+    if (this.isRunning) {
+      setTimeout(() => this.processLoop(), 2000);
+    }
   }
 
-  // Busca drafts e retorna array de prompts
   async getDrafts() {
+    // So funciona na pagina /drafts
+    if (!location.href.includes('/drafts')) {
+      this.log('Indo para /drafts...');
+      this.saveToStorage();
+      location.href = 'https://sora.chatgpt.com/drafts';
+      return null;
+    }
+
     try {
       const response = await fetch('/backend-api/v1/draft?limit=20');
       if (response.ok) {
         const data = await response.json();
-        // Extrair prompts dos drafts
         const drafts = Array.isArray(data) ? data : (data.items || data.drafts || []);
         return drafts.map(d => (d.prompt || d.text || '').trim().toLowerCase());
       }
     } catch (e) {
-      console.error('[SoraQM] Erro fetch drafts:', e);
+      this.log('Erro ao buscar drafts: ' + e.message);
     }
     return [];
   }
 
-  // Verifica quantos dos prompts ativos ja apareceram nos drafts
   async checkCompleted() {
     const drafts = await this.getDrafts();
+    if (drafts === null) return false; // navegando...
 
     if (drafts.length === 0) {
       this.log('Nenhum draft encontrado');
-      return;
+      return true;
     }
 
-    // Verificar cada prompt ativo
     const stillActive = [];
     for (const prompt of this.activePrompts) {
       const normalized = prompt.trim().toLowerCase();
       if (drafts.includes(normalized)) {
-        // Apareceu nos drafts = concluiu!
-        this.log(`Concluido: "${prompt.substring(0, 30)}..."`);
+        this.log(`OK: "${prompt.substring(0, 25)}..."`);
         this.completedCount++;
       } else {
         stillActive.push(prompt);
@@ -60,28 +71,33 @@ class SoraQueueManager {
     this.activePrompts = stillActive;
     this.saveToStorage();
     this.updateUI();
+    return true;
   }
 
   async submitPrompt(prompt) {
-    this.log(`Enviando: "${prompt.substring(0, 35)}..."`);
+    // Precisa estar na pagina principal para enviar
+    if (location.href.includes('/drafts')) {
+      this.log('Indo para pagina principal...');
+      this.saveToStorage();
+      location.href = 'https://sora.chatgpt.com/';
+      return false;
+    }
+
+    this.log(`Enviando: "${prompt.substring(0, 30)}..."`);
 
     try {
-      // Encontrar textarea
       const textarea = document.querySelector('textarea');
       if (!textarea) throw new Error('Textarea nao encontrada');
 
-      // Preencher
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
       setter?.call(textarea, prompt);
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
 
       await this.sleep(800);
 
-      // Encontrar botao
       const btn = this.findCreateButton();
       if (!btn) throw new Error('Botao nao encontrado');
 
-      // Esperar habilitar
       let tries = 0;
       while (btn.disabled && tries < 10) {
         await this.sleep(300);
@@ -115,24 +131,37 @@ class SoraQueueManager {
   async processLoop() {
     if (!this.isRunning) return;
 
-    // Verificar conclusoes
-    await this.checkCompleted();
+    // 1. Checar conclusoes (vai para /drafts se necessario)
+    const checked = await this.checkCompleted();
+    if (!checked) return; // navegando...
 
     const slots = this.maxConcurrent - this.activePrompts.length;
-    this.log(`Slots: ${slots}/3 | Fila: ${this.queue.length}`);
+    this.log(`Slots: ${slots}/3 | Fila: ${this.queue.length} | Ativos: ${this.activePrompts.length}`);
 
-    // Enviar se tem slot
+    // 2. Se tem slot e fila, enviar (vai para / se necessario)
     if (slots > 0 && this.queue.length > 0) {
       const prompt = this.queue.shift();
-      const ok = await this.submitPrompt(prompt);
-      if (!ok) this.queue.unshift(prompt);
       this.saveToStorage();
+
+      const ok = await this.submitPrompt(prompt);
+      if (ok === false && !location.href.includes('/drafts')) {
+        // Falhou, devolver
+        this.queue.unshift(prompt);
+        this.saveToStorage();
+      }
+      return; // pode ter navegado
     }
 
-    // Verificar fim
+    // 3. Verificar fim
     if (this.queue.length === 0 && this.activePrompts.length === 0) {
       this.log('Tudo concluido!');
       this.stop();
+      return;
+    }
+
+    // 4. Se tem prompts ativos, continuar checando
+    if (this.activePrompts.length > 0) {
+      this.pollingTimer = setTimeout(() => this.processLoop(), 5000);
     }
 
     this.updateUI();
@@ -159,15 +188,13 @@ class SoraQueueManager {
     this.log('Iniciando...');
     this.updateUI();
 
-    // Loop a cada 5s
     this.processLoop();
-    this.pollingTimer = setInterval(() => this.processLoop(), 5000);
   }
 
   stop() {
     this.isRunning = false;
     if (this.pollingTimer) {
-      clearInterval(this.pollingTimer);
+      clearTimeout(this.pollingTimer);
       this.pollingTimer = null;
     }
     this.log('Parado');
@@ -179,6 +206,7 @@ class SoraQueueManager {
     this.queue = [];
     this.activePrompts = [];
     this.completedCount = 0;
+    this.isRunning = false;
     this.saveToStorage();
     this.log('Limpo');
     this.updateUI();
@@ -199,14 +227,7 @@ class SoraQueueManager {
       this.queue = data.queue || [];
       this.activePrompts = data.activePrompts || [];
       this.completedCount = data.completedCount || 0;
-
-      if (data.isRunning) {
-        this.isRunning = true;
-        setTimeout(() => {
-          this.processLoop();
-          this.pollingTimer = setInterval(() => this.processLoop(), 5000);
-        }, 2000);
-      }
+      this.isRunning = data.isRunning || false;
     } catch (e) {}
   }
 
@@ -215,7 +236,7 @@ class SoraQueueManager {
     panel.id = 'sora-queue-panel';
     panel.innerHTML = `
       <div class="sqm-header">
-        <span>Sora Queue v5</span>
+        <span>Sora Queue v6</span>
         <button id="sqm-toggle">-</button>
       </div>
       <div class="sqm-body" id="sqm-body">
@@ -235,88 +256,36 @@ class SoraQueueManager {
     `;
     document.body.appendChild(panel);
 
-    // Estilos
     const style = document.createElement('style');
     style.textContent = `
       #sora-queue-panel {
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        width: 300px;
-        background: #1a1a2e;
-        border: 1px solid #4a4a6a;
-        border-radius: 8px;
-        font-family: system-ui;
-        font-size: 13px;
-        color: #fff;
-        z-index: 99999;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        position: fixed; top: 10px; right: 10px; width: 300px;
+        background: #1a1a2e; border: 1px solid #4a4a6a; border-radius: 8px;
+        font-family: system-ui; font-size: 13px; color: #fff; z-index: 99999;
       }
       .sqm-header {
-        display: flex;
-        justify-content: space-between;
-        padding: 8px 12px;
-        background: #667eea;
-        border-radius: 7px 7px 0 0;
-        font-weight: bold;
+        display: flex; justify-content: space-between; padding: 8px 12px;
+        background: #667eea; border-radius: 7px 7px 0 0; font-weight: bold;
       }
       .sqm-header.running { background: #10b981; }
-      .sqm-header button {
-        background: none;
-        border: none;
-        color: #fff;
-        cursor: pointer;
-        font-size: 16px;
-      }
+      .sqm-header button { background: none; border: none; color: #fff; cursor: pointer; font-size: 16px; }
       .sqm-body { padding: 10px; }
       #sqm-prompts {
-        width: 100%;
-        height: 80px;
-        background: #252545;
-        border: 1px solid #4a4a6a;
-        border-radius: 4px;
-        color: #fff;
-        padding: 8px;
-        resize: vertical;
-        box-sizing: border-box;
+        width: 100%; height: 80px; background: #252545; border: 1px solid #4a4a6a;
+        border-radius: 4px; color: #fff; padding: 8px; resize: vertical; box-sizing: border-box;
       }
-      .sqm-status {
-        display: flex;
-        justify-content: space-between;
-        margin: 8px 0;
-        font-size: 12px;
-      }
-      .sqm-buttons {
-        display: flex;
-        gap: 5px;
-      }
-      .sqm-buttons button {
-        flex: 1;
-        padding: 6px;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-weight: bold;
-      }
+      .sqm-status { display: flex; justify-content: space-between; margin: 8px 0; font-size: 12px; }
+      .sqm-buttons { display: flex; gap: 5px; }
+      .sqm-buttons button { flex: 1; padding: 6px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
       #sqm-start { background: #10b981; color: #fff; }
       #sqm-stop { background: #ef4444; color: #fff; }
       #sqm-clear { background: #6b7280; color: #fff; }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
-      .sqm-log {
-        margin-top: 8px;
-        height: 100px;
-        overflow-y: auto;
-        background: #0d0d1a;
-        border-radius: 4px;
-        padding: 6px;
-        font-size: 11px;
-        font-family: monospace;
-      }
+      .sqm-log { margin-top: 8px; height: 100px; overflow-y: auto; background: #0d0d1a; border-radius: 4px; padding: 6px; font-size: 11px; font-family: monospace; }
       .sqm-log div { margin: 2px 0; color: #a0a0c0; }
     `;
     document.head.appendChild(style);
 
-    // Eventos
     document.getElementById('sqm-toggle').onclick = () => {
       const body = document.getElementById('sqm-body');
       body.style.display = body.style.display === 'none' ? 'block' : 'none';
@@ -339,13 +308,9 @@ class SoraQueueManager {
     if (a) a.textContent = this.activePrompts.length;
     if (q) q.textContent = this.queue.length;
     if (d) d.textContent = this.completedCount;
-
     if (start) start.disabled = this.isRunning;
     if (stop) stop.disabled = !this.isRunning;
-
-    if (header) {
-      header.classList.toggle('running', this.isRunning);
-    }
+    if (header) header.classList.toggle('running', this.isRunning);
   }
 
   log(msg) {
@@ -358,14 +323,9 @@ class SoraQueueManager {
     }
   }
 
-  sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-  }
+  sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
 
-// Iniciar
 if (!window.soraQM && location.href.includes('sora.chatgpt.com')) {
-  setTimeout(() => {
-    window.soraQM = new SoraQueueManager();
-  }, 1000);
+  setTimeout(() => { window.soraQM = new SoraQueueManager(); }, 1000);
 }
