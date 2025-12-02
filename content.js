@@ -4,7 +4,7 @@
 // v3.1.0 - Suporte a envio via DOM e API
 // ========================================
 
-console.log('%c[Sora Automation] Script carregado v3.1.0', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
+console.log('%c[Sora Automation] Script carregado v3.2.0', 'background: #667eea; color: white; padding: 4px 8px; border-radius: 4px;');
 
 class SoraPromptAutomation {
   constructor() {
@@ -13,7 +13,8 @@ class SoraPromptAutomation {
       orientation: 'portrait',  // portrait, landscape, square
       duration: 300,            // 150 = 5s, 300 = 10s, 450 = 20s
       model: 'sy_8',
-      submitMode: 'dom'         // 'dom' ou 'api'
+      submitMode: 'dom',        // 'dom' ou 'api'
+      delay: 3000               // delay entre prompts em ms
     };
 
     // Estado
@@ -22,7 +23,6 @@ class SoraPromptAutomation {
     this.isPaused = false;
     this.maxConcurrent = 3;
     this.pollingInterval = 5000; // 5 segundos
-    this.submitDelay = 3000;     // 3 segundos entre envios
     this.pollingTimer = null;
     this.activeTasks = [];
     this.completedCount = 0;
@@ -558,8 +558,8 @@ class SoraPromptAutomation {
 
       // Delay entre submissoes para evitar rate limiting
       if (this.queue.length > 0 && this.activeTasks.length < this.maxConcurrent) {
-        this.log(`Aguardando ${this.submitDelay / 1000}s...`);
-        await this.sleep(this.submitDelay);
+        this.log(`Aguardando ${this.config.delay / 1000}s...`);
+        await this.sleep(this.config.delay);
       }
     }
   }
@@ -706,6 +706,22 @@ class SoraPromptAutomation {
           </div>
         </div>
 
+        <div class="sqm-config sqm-config-single">
+          <div class="sqm-config-row sqm-config-full">
+            <label>Pausa entre prompts:</label>
+            <select id="sqm-delay">
+              <option value="1000">1 segundo</option>
+              <option value="2000">2 segundos</option>
+              <option value="3000" selected>3 segundos</option>
+              <option value="5000">5 segundos</option>
+              <option value="10000">10 segundos</option>
+              <option value="15000">15 segundos</option>
+              <option value="30000">30 segundos</option>
+              <option value="60000">1 minuto</option>
+            </select>
+          </div>
+        </div>
+
         <!-- Textarea de Prompts -->
         <div class="sqm-section">
           <label>Prompts (um por linha):</label>
@@ -812,10 +828,18 @@ class SoraPromptAutomation {
       this.log(`Duracao: ${seconds}`);
     });
 
+    document.getElementById('sqm-delay').addEventListener('change', (e) => {
+      this.config.delay = parseInt(e.target.value);
+      this.saveToStorage();
+      const seconds = parseInt(e.target.value) / 1000;
+      this.log(`Pausa entre prompts: ${seconds}s`);
+    });
+
     // Restaura config nos selects
     document.getElementById('sqm-submit-mode').value = this.config.submitMode;
     document.getElementById('sqm-orientation').value = this.config.orientation;
     document.getElementById('sqm-duration').value = this.config.duration.toString();
+    document.getElementById('sqm-delay').value = this.config.delay.toString();
 
     // Textarea - contar prompts
     const textarea = document.getElementById('sqm-prompts');
