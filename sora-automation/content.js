@@ -1,16 +1,16 @@
 // ========================================
-// content.js — Sora Automation v4.0.0
-// MODO PENDING CHECK: Monitora slots vazios
+// content.js — Sora Automation v4.2.0
+// MODO PENDING CHECK: Monitora logs do console
 //
 // Fluxo:
 // 1. Envia os primeiros 3 rapidamente
-// 2. Monitora o "pending" via interceptação de rede
-// 3. Quando pending === "[]", espera 5s e envia próximo
+// 2. Intercepta console.log para detectar "pending"
+// 3. Quando pending contém "[]", espera 5s e envia próximo
 // ========================================
 
 class SoraAutomation {
   constructor() {
-    this.version = '4.0.0';
+    this.version = '4.2.0';
     console.log(`%c[Sora v${this.version}] ===== PENDING CHECK MODE =====`, 'color: #00ff00; font-weight: bold; font-size: 14px');
 
     // Estado
@@ -28,21 +28,19 @@ class SoraAutomation {
     this.initialBurst = 3;              // Enviar 3 no início
     this.waitBetweenBurst = 3000;       // 3 segundos entre os iniciais
     this.waitAfterEmptySlot = 5000;     // 5 segundos após detectar slot vazio
-    this.pendingCheckInterval = 2000;   // Checar pending a cada 2 segundos
 
     // Pending tracking
-    this.lastPendingData = null;
-    this.pendingCheckTimer = null;
+    this.lastPendingValue = null;
     this.waitingForSlot = false;
+    this.pendingCount = 0;
 
     // Bind
     this.handleMessage = this.handleMessage.bind(this);
     this.processQueue = this.processQueue.bind(this);
     this.sendPrompt = this.sendPrompt.bind(this);
-    this.checkPending = this.checkPending.bind(this);
 
-    // Interceptar requisições de rede para capturar pending
-    this.setupNetworkInterceptor();
+    // Interceptar console.log para capturar mensagens de pending
+    this.setupConsoleInterceptor();
 
     // Listener de mensagens
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -53,89 +51,73 @@ class SoraAutomation {
     // Criar UI flutuante
     this.createFloatingUI();
 
-    console.log(`[Sora v${this.version}] Ready - Modo Pending Check`);
+    console.log(`[Sora v${this.version}] Ready - Monitorando console para "pending"`);
   }
 
   // ============================================================
-  // INTERCEPTOR DE REDE - Captura respostas de pending
+  // INTERCEPTOR DE CONSOLE - Captura mensagens de pending
   // ============================================================
-  setupNetworkInterceptor() {
+  setupConsoleInterceptor() {
     const self = this;
+    const originalLog = console.log;
 
-    // Interceptar fetch
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const response = await originalFetch.apply(this, args);
+    console.log = function(...args) {
+      // Chamar o original primeiro
+      originalLog.apply(console, args);
 
-      // Clonar response para ler o body
-      const url = args[0]?.url || args[0];
-      if (typeof url === 'string' && url.includes('pending')) {
-        try {
-          const clone = response.clone();
-          const text = await clone.text();
-          self.onPendingResponse(text, url);
-        } catch (e) {
-          // Ignorar erros de parsing
-        }
-      }
-
-      return response;
-    };
-
-    // Interceptar XMLHttpRequest
-    const originalXHROpen = XMLHttpRequest.prototype.open;
-    const originalXHRSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this._soraUrl = url;
-      return originalXHROpen.apply(this, [method, url, ...rest]);
-    };
-
-    XMLHttpRequest.prototype.send = function(...args) {
-      if (this._soraUrl && this._soraUrl.includes('pending')) {
-        this.addEventListener('load', function() {
+      // Verificar se algum argumento contém "pending"
+      const message = args.map(arg => {
+        if (typeof arg === 'string') return arg;
+        if (typeof arg === 'object') {
           try {
-            self.onPendingResponse(this.responseText, this._soraUrl);
+            return JSON.stringify(arg);
           } catch (e) {
-            // Ignorar
+            return String(arg);
           }
-        });
+        }
+        return String(arg);
+      }).join(' ');
+
+      // Procurar por "pending" na mensagem (case insensitive)
+      if (message.toLowerCase().includes('pending')) {
+        self.onPendingDetected(message, args);
       }
-      return originalXHRSend.apply(this, args);
     };
 
-    this.log('🔌 Network interceptor ativo', 'color: #00ffaa');
+    this.log('🔌 Console interceptor ativo (monitorando "pending")', 'color: #00ffaa');
   }
 
   // ============================================================
   // HANDLER DE PENDING
   // ============================================================
-  onPendingResponse(responseText, url) {
-    try {
-      const data = JSON.parse(responseText);
-      this.lastPendingData = data;
+  onPendingDetected(message, args) {
+    // Ignorar nossas próprias mensagens
+    if (message.includes('[Sora v')) return;
 
-      // Log do pending
-      const isEmpty = Array.isArray(data) && data.length === 0;
-      const count = Array.isArray(data) ? data.length : '?';
+    this.pendingCount++;
 
-      if (isEmpty) {
-        console.log(`%c[Sora v${this.version}] 📭 PENDING: [] (SLOT VAZIO!)`, 'color: #00ff00; font-weight: bold');
-      } else {
-        console.log(`%c[Sora v${this.version}] 📬 PENDING: ${count} item(s)`, 'color: #ffaa00');
-      }
+    // Verificar se contém "[]" (array vazio)
+    const hasEmptyArray = message.includes('[]') ||
+                         message.includes('[ ]') ||
+                         (args.some(arg => Array.isArray(arg) && arg.length === 0));
 
-      // Se estamos aguardando slot e encontramos vazio
-      if (this.waitingForSlot && isEmpty) {
+    // Atualizar último valor
+    this.lastPendingValue = message;
+
+    if (hasEmptyArray) {
+      console.log(`%c[Sora v${this.version}] 📭 PENDING VAZIO DETECTADO! []`, 'color: #00ff00; font-weight: bold; font-size: 14px');
+      console.log(`%c[Sora v${this.version}] Mensagem original: ${message.substring(0, 100)}...`, 'color: #00aaff');
+
+      // Se estamos aguardando slot, processar
+      if (this.waitingForSlot) {
         this.onEmptySlotDetected();
       }
-
-      // Atualizar UI
-      this.updateFloatingUI();
-
-    } catch (e) {
-      // Não é JSON válido, ignorar
+    } else {
+      console.log(`%c[Sora v${this.version}] 📬 Pending detectado (não vazio)`, 'color: #ffaa00');
     }
+
+    // Atualizar UI
+    this.updateFloatingUI();
   }
 
   // ============================================================
@@ -154,33 +136,6 @@ class SoraAutomation {
         this.sendNextPrompt();
       }
     }, this.waitAfterEmptySlot);
-  }
-
-  // ============================================================
-  // FORÇAR CHECK DE PENDING
-  // ============================================================
-  async checkPending() {
-    // Tentar fazer uma requisição que retorne o pending
-    // Isso depende da API do Sora - vamos tentar recarregar a página parcialmente
-    // ou simplesmente esperar o próximo request natural
-
-    try {
-      // Tentar buscar dados de pending diretamente
-      const response = await fetch('https://sora.chatgpt.com/backend-api/v1/video/pending', {
-        credentials: 'include',
-        headers: {
-          'Accept': 'application/json'
-        }
-      });
-
-      if (response.ok) {
-        const text = await response.text();
-        this.onPendingResponse(text, 'manual-check');
-      }
-    } catch (e) {
-      // API pode não existir nesse path, usar scroll para forçar refresh
-      this.log('📡 Aguardando atualização de pending...', 'color: #888888');
-    }
   }
 
   // ============================================================
@@ -242,7 +197,7 @@ class SoraAutomation {
 
     this.log(`📋 Total de prompts: ${this.prompts.length}`);
     this.log(`⚡ Primeiros ${Math.min(this.initialBurst, this.prompts.length)} serão enviados rapidamente`);
-    this.log(`📭 Depois: Aguarda pending vazio + 5s`);
+    this.log(`📭 Depois: Aguarda tasks vazio + 5s`);
 
     // Mostrar UI
     this.showFloatingUI();
@@ -275,9 +230,9 @@ class SoraAutomation {
     this.isPaused = false;
     this.updateFloatingUI();
 
-    // Se estava aguardando slot, continuar
+    // Se estava aguardando slot, o interceptor de console já está ativo
     if (this.waitingForSlot) {
-      this.startPendingMonitor();
+      this.log('👀 Continuando a aguardar pending vazio...', 'color: #888888');
     }
   }
 
@@ -328,37 +283,10 @@ class SoraAutomation {
       this.log('═══════════════════════════════', 'color: #ffaa00');
 
       this.waitingForSlot = true;
-      this.startPendingMonitor();
+      this.log('👀 Aguardando pending vazio no console...', 'color: #888888');
     } else if (this.currentIndex >= this.prompts.length) {
       this.onComplete();
     }
-  }
-
-  // ============================================================
-  // MONITOR DE PENDING
-  // ============================================================
-  startPendingMonitor() {
-    // Limpar timer anterior
-    if (this.pendingCheckTimer) {
-      clearInterval(this.pendingCheckTimer);
-    }
-
-    this.log('👀 Iniciando monitoramento de pending...', 'color: #888888');
-
-    // Verificar periodicamente
-    this.pendingCheckTimer = setInterval(() => {
-      if (!this.isActive || this.isPaused) return;
-
-      // Verificar se o último pending detectado era vazio
-      if (this.lastPendingData && Array.isArray(this.lastPendingData) && this.lastPendingData.length === 0) {
-        // Já detectou vazio, o handler vai processar
-        return;
-      }
-
-      // Forçar check
-      this.checkPending();
-
-    }, this.pendingCheckInterval);
   }
 
   // ============================================================
@@ -392,7 +320,7 @@ class SoraAutomation {
 
     this.updateFloatingUI();
 
-    // Continuar monitorando pending para o próximo
+    // Continuar monitorando tasks para o próximo
     if (this.currentIndex < this.prompts.length) {
       this.waitingForSlot = true;
       this.log('👀 Aguardando próximo slot vazio...', 'color: #888888');
@@ -540,7 +468,7 @@ class SoraAutomation {
         </div>
         <div class="sora-ui-stats">
           <span class="sora-ui-sent">0</span> enviados
-          <span class="sora-ui-pending-count">| Pending: --</span>
+          <span class="sora-ui-pending-count">| Pending: aguardando</span>
         </div>
         <div class="sora-ui-actions">
           <button class="sora-ui-btn sora-ui-btn-pause" disabled>⏸️</button>
@@ -804,10 +732,14 @@ class SoraAutomation {
     // Stats
     sentCount.textContent = this.stats.sent;
 
-    // Pending count
-    if (this.lastPendingData && Array.isArray(this.lastPendingData)) {
-      pendingCount.textContent = `| Pending: ${this.lastPendingData.length}`;
-      pendingCount.style.color = this.lastPendingData.length === 0 ? '#00ff00' : '#ffaa00';
+    // Pending status
+    if (this.lastPendingValue) {
+      const hasEmpty = this.lastPendingValue.includes('[]');
+      pendingCount.textContent = hasEmpty ? '| Pending: [] VAZIO' : '| Pending: processando';
+      pendingCount.style.color = hasEmpty ? '#00ff00' : '#ffaa00';
+    } else {
+      pendingCount.textContent = '| Pending: aguardando';
+      pendingCount.style.color = '#888888';
     }
 
     // Buttons
@@ -892,7 +824,8 @@ class SoraAutomation {
       sent: this.stats.sent,
       errors: this.stats.errors,
       remaining: this.prompts.length - this.currentIndex,
-      pendingCount: this.lastPendingData ? (Array.isArray(this.lastPendingData) ? this.lastPendingData.length : null) : null
+      pendingCount: this.pendingCount,
+      lastPendingEmpty: this.lastPendingValue ? this.lastPendingValue.includes('[]') : null
     };
   }
 
@@ -921,9 +854,10 @@ class SoraAutomation {
 // BOOTSTRAP
 // ========================================
 (() => {
-  console.log('%c[Sora Automation] ===== v4.0.0 PENDING CHECK MODE =====', 'color: #00ff00; font-weight: bold; font-size: 14px');
-  console.log('%c[Sora] ⚡ Primeiros 3: Modo BURST', 'color: #00ffaa');
-  console.log('%c[Sora] 📭 Depois: Aguarda pending = [] + 5s', 'color: #ffaa00');
+  console.log('%c[Sora Automation] ===== v4.2.0 CONSOLE PENDING MODE =====', 'color: #00ff00; font-weight: bold; font-size: 14px');
+  console.log('%c[Sora] ⚡ Primeiros 3: Modo BURST (envio rápido)', 'color: #00ffaa');
+  console.log('%c[Sora] 📭 Depois: Monitora console para "pending" com "[]"', 'color: #ffaa00');
+  console.log('%c[Sora] ⏱️ Quando detectar [] → espera 5s → envia próximo', 'color: #00aaff');
 
   const automation = new SoraAutomation();
   window._soraAutomation = automation;
